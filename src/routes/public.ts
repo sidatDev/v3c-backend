@@ -91,9 +91,14 @@ export default async function publicRoutes(fastify: FastifyInstance, options: Fa
         take: 20
       });
       if (kbEntries && kbEntries.length > 0) {
-        const snippets = kbEntries
+        let snippets = kbEntries
           .map(e => `[SOURCE: ${e.fileName || 'Knowledge Base'}]\n${e.content}`)
           .join('\n\n---\n\n');
+
+        if (snippets.length > 8000) {
+          snippets = snippets.substring(0, 8000) + '\n\n[... Knowledge Base truncated for real-time memory efficiency ...]';
+        }
+
         kbPrompt = `
 
 ### CRITICAL RULE — Official Knowledge Base (MUST FOLLOW):
@@ -315,27 +320,47 @@ ${snippets}`;
       const vectorResults: any[] = await prisma.$queryRawUnsafe(`
         SELECT id, content, metadata, 1 - (embedding <=> '${embeddingSql}'::vector) as similarity
         FROM "DocumentChunk"
-        WHERE "tenantId" = '${tenantId}'
+        WHERE "tenantId" = '${tenantId}' AND embedding IS NOT NULL
         ORDER BY embedding <=> '${embeddingSql}'::vector ASC
-        LIMIT 4;
+        LIMIT 8;
       `);
 
       if (vectorResults && vectorResults.length > 0) {
-        contextText = vectorResults
-          .filter(r => r.similarity > 0.3)
-          .map(r => r.content)
-          .join('\n---\n');
-
-        vectorResults.forEach(r => {
-          if (r.metadata && (r.metadata as any).filename) {
-            sources.push({ title: (r.metadata as any).filename });
-          } else if (r.metadata && (r.metadata as any).title) {
-            sources.push({ title: (r.metadata as any).title, url: (r.metadata as any).url });
-          }
-        });
+        const filtered = vectorResults.filter(r => r.similarity > 0.1);
+        if (filtered.length > 0) {
+          contextText = filtered.map(r => r.content).join('\n---\n');
+          filtered.forEach(r => {
+            if (r.metadata && (r.metadata as any).filename) {
+              sources.push({ title: (r.metadata as any).filename });
+            } else if (r.metadata && (r.metadata as any).title) {
+              sources.push({ title: (r.metadata as any).title, url: (r.metadata as any).url });
+            }
+          });
+        }
       }
     } catch (err) {
-      console.warn('RAG embedding search failed or pgvector not available, continuing with fallback prompt:', err);
+      console.warn('RAG embedding search failed, continuing with fallback:', err);
+    }
+
+    // Fallback: If vector search returned no context, load raw KnowledgeBaseEntry snippets for tenant
+    if (!contextText || contextText.trim() === '') {
+      try {
+        const kbEntries = await prisma.knowledgeBaseEntry.findMany({
+          where: { tenantId, enabled: true },
+          orderBy: { createdAt: 'desc' },
+          take: 5
+        });
+        if (kbEntries && kbEntries.length > 0) {
+          contextText = kbEntries
+            .map(e => `[${e.fileName || 'Knowledge Source'}]\n${e.content}`)
+            .join('\n---\n');
+          if (contextText.length > 6000) {
+            contextText = contextText.substring(0, 6000);
+          }
+        }
+      } catch (err) {
+        console.warn('Fallback KB fetch failed:', err);
+      }
     }
 
     // 3. Construct System Prompt with Language Constraints
