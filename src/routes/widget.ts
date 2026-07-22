@@ -4,8 +4,30 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
+import { openai } from '../utils/openai';
 
 export default async function widgetRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
+
+  // @route   GET /api/widget/voice-preview
+  // @desc    Generate live OpenAI TTS audio preview for selected voice
+  fastify.get('/voice-preview', { preHandler: [protect, restrictTo('widget', 'view')] }, async (request, reply) => {
+    const query = request.query as any;
+    const voice = (query.voice || 'alloy').toLowerCase();
+
+    try {
+      const mp3 = await openai.audio.speech.create({
+        model: 'tts-1',
+        voice: voice as any,
+        input: `Hello! This is a preview of the ${voice} voice for your AI assistant.`,
+      });
+
+      const buffer = Buffer.from(await mp3.arrayBuffer());
+      reply.type('audio/mpeg');
+      return reply.send(buffer);
+    } catch (err: any) {
+      throw new AppError(err?.message || 'Failed to generate voice preview', 500);
+    }
+  });
 
   // Helper to ensure WidgetConfig & Agent exist for tenant
   async function getOrCreateWidgetAndAgent(tenantId: string) {
