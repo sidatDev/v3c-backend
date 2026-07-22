@@ -1,0 +1,944 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AdminProfile {
+  id                        Int             @id @default(autoincrement())
+  userId                    Int             @unique
+  packagePlan               String
+  price                     String
+  nextBillingDate           DateTime
+  leadsIncluded             Int
+  leadsUsed                 Int
+  storage                   String
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime
+  domainId                  Int?
+  secureId                  String?         @unique
+  conversationsIncluded     Int             @default(1000)
+  conversationsUsed         Int             @default(0)
+  currentBillingPeriodStart DateTime        @default(now())
+  tenantId                  String?
+  Domain                    Domain?         @relation(fields: [domainId], references: [id])
+  Tenant                    Tenant?         @relation(fields: [tenantId], references: [id])
+  User                      User            @relation(fields: [userId], references: [id])
+  Invoice                   Invoice[]
+  PaymentMethod             PaymentMethod[]
+
+  @@index([domainId])
+  @@index([secureId])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model Agent {
+  id                     String           @id
+  name                   String
+  tenantId               String
+  description            String?
+  modelSource            String           @default("REALTIME")
+  voice                  String           @default("alloy")
+  voiceSettings          Json?
+  language               String           @default("English")
+  systemPrompt           String?
+  elevenlabsApiKey       String?
+  elevenlabsVoiceId      String?
+  isActive               Boolean          @default(true)
+  voipEnabled            Boolean          @default(false)
+  phoneNumber            String?          @unique
+  voipApiKey             String?
+  voipApiSecret          String?
+  voipProvider           String?          @default("twilio")
+  showQuickQuestions     Boolean          @default(false)
+  showPreSessionForm     Boolean          @default(false)
+  initialGreetingMessage String?
+  domainId               Int?             @unique
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime
+  defaultMode            String           @default("VOICE")
+  widgetMode             String           @default("BOTH")
+  accentColor            String           @default("#4F46E5")
+  launcherIconUrl        String?
+  launcherStyle          String           @default("orb")
+  leadFormFields         Json?
+  widgetTheme            String           @default("light")
+  Domain                 Domain?          @relation(fields: [domainId], references: [id])
+  Tenant                 Tenant           @relation(fields: [tenantId], references: [id])
+  Conversation           Conversation[]
+  Lead                   Lead[]
+  VisitorSession         VisitorSession[]
+  VoipCall               VoipCall[]
+
+  @@index([domainId])
+  @@index([phoneNumber])
+  @@index([tenantId])
+}
+
+model AuditLog {
+  id           String   @id
+  userId       Int?
+  tenantId     String?
+  action       String
+  resourceType String
+  resourceId   String?
+  details      Json?
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  Tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  User         User?    @relation(fields: [userId], references: [id])
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model Configuration {
+  id        Int      @id @default(autoincrement())
+  key       String
+  value     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  domainId  Int?
+  tenantId  String?
+  Domain    Domain?  @relation(fields: [domainId], references: [id])
+  Tenant    Tenant?  @relation(fields: [tenantId], references: [id])
+
+  @@unique([key, domainId])
+  @@index([domainId])
+  @@index([tenantId])
+}
+
+model Conversation {
+  id               Int             @id @default(autoincrement())
+  leadId           Int
+  message          String
+  sender           String
+  createdAt        DateTime        @default(now())
+  domainId         Int?
+  secureId         String?         @unique
+  userId           String?
+  visitorId        Int?
+  visitorSessionId Int?
+  tenantId         String?
+  aiAgentId        String?
+  Agent            Agent?          @relation(fields: [aiAgentId], references: [id])
+  Domain           Domain?         @relation(fields: [domainId], references: [id])
+  Lead             Lead            @relation(fields: [leadId], references: [id])
+  Tenant           Tenant?         @relation(fields: [tenantId], references: [id])
+  Visitor          Visitor?        @relation(fields: [visitorId], references: [id])
+  VisitorSession   VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+
+  @@index([aiAgentId])
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([leadId])
+  @@index([secureId])
+  @@index([sender])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([visitorId])
+  @@index([visitorSessionId])
+}
+
+model ConversationEvaluation {
+  id                   String         @id
+  visitorSessionId     Int
+  tenantId             String
+  resolutionQuality    Float?
+  answerRelevance      Float?
+  customerSatisfaction Float?
+  overallScore         Float?
+  feedback             String?
+  createdAt            DateTime       @default(now())
+  Tenant               Tenant         @relation(fields: [tenantId], references: [id])
+  VisitorSession       VisitorSession @relation(fields: [visitorSessionId], references: [id])
+
+  @@index([createdAt])
+  @@index([tenantId])
+  @@index([visitorSessionId])
+}
+
+model CrawledPage {
+  id            Int                    @id @default(autoincrement())
+  url           String                 @unique
+  title         String?
+  content       String?
+  enabled       Boolean                @default(true)
+  lastCrawled   DateTime?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime
+  domainId      Int?
+  secureId      String?                @unique
+  embedding     Unsupported("vector")?
+  tenantId      String?
+  error         String?
+  status        String                 @default("PENDING")
+  Domain        Domain?                @relation(fields: [domainId], references: [id])
+  Tenant        Tenant?                @relation(fields: [tenantId], references: [id])
+  DocumentChunk DocumentChunk[]
+
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([enabled])
+  @@index([lastCrawled])
+  @@index([secureId])
+  @@index([tenantId])
+  @@index([url])
+  @@index([domainId], map: "idx_crawled_page_domain_id")
+  @@index([url], map: "idx_crawled_page_url")
+}
+
+model DocumentChunk {
+  id                 String                 @id
+  content            String
+  embedding          Unsupported("vector")?
+  metadata           Json?
+  entryId            Int?
+  pageId             Int?
+  tenantId           String?
+  KnowledgeBaseEntry KnowledgeBaseEntry?    @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  CrawledPage        CrawledPage?           @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  Tenant             Tenant?                @relation(fields: [tenantId], references: [id])
+
+  @@index([entryId])
+  @@index([pageId])
+  @@index([tenantId])
+}
+
+model Domain {
+  id                 Int                  @id @default(autoincrement())
+  publicKey          String               @unique
+  privateKey         String               @unique
+  domain             String               @unique
+  expiryDate         DateTime
+  createdDate        DateTime             @default(now())
+  packageType        String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime
+  tenantId           String?
+  AdminProfile       AdminProfile[]
+  Agent              Agent?
+  Configuration      Configuration[]
+  Conversation       Conversation[]
+  CrawledPage        CrawledPage[]
+  Tenant             Tenant?              @relation(fields: [tenantId], references: [id])
+  Invoice            Invoice[]
+  KnowledgeBaseEntry KnowledgeBaseEntry[]
+  Lead               Lead[]
+  Note               Note[]
+  PaymentMethod      PaymentMethod[]
+  Persona            Persona?
+  Product            Product[]
+  QuickQuestion      QuickQuestion[]
+  TeamMember         TeamMember[]
+  User               User[]
+  Visitor            Visitor[]
+  VisitorSession     VisitorSession[]
+  VoipConfig         VoipConfig?
+  WidgetConfig       WidgetConfig[]
+
+  @@index([domain])
+  @@index([expiryDate])
+  @@index([packageType])
+  @@index([privateKey])
+  @@index([publicKey])
+  @@index([tenantId])
+}
+
+model GuardrailConfig {
+  id               String   @id
+  tenantId         String   @unique
+  prohibitedTopics String[] @default([])
+  brandSafety      Boolean  @default(true)
+  fallbackResponse String   @default("I'm sorry, I cannot discuss that topic.")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime
+  Tenant           Tenant   @relation(fields: [tenantId], references: [id])
+}
+
+model GuardrailLog {
+  id            String   @id
+  tenantId      String
+  input         String
+  output        String
+  triggered     Boolean  @default(false)
+  violationType String?
+  createdAt     DateTime @default(now())
+  Tenant        Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+}
+
+model Integration {
+  id              String            @id
+  tenantId        String
+  name            String
+  description     String?
+  baseUrl         String
+  authType        String            @default("NONE")
+  authConfig      Json?
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime
+  Tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  IntegrationLog  IntegrationLog[]
+  IntegrationTool IntegrationTool[]
+
+  @@index([tenantId])
+}
+
+model IntegrationLog {
+  id            String      @id
+  integrationId String
+  tenantId      String
+  action        String
+  requestBody   Json?
+  responseBody  Json?
+  statusCode    Int?
+  duration      Int?
+  createdAt     DateTime    @default(now())
+  Integration   Integration @relation(fields: [integrationId], references: [id])
+  Tenant        Tenant      @relation(fields: [tenantId], references: [id])
+
+  @@index([integrationId])
+  @@index([tenantId])
+}
+
+model IntegrationTool {
+  id                     String      @id
+  integrationId          String
+  name                   String
+  description            String
+  method                 String      @default("GET")
+  path                   String
+  parameters             Json?
+  isActive               Boolean     @default(true)
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime
+  requestCompleteMessage String?
+  requestDelayedMessage  String?
+  requestFailedMessage   String?
+  requestStartMessage    String?
+  Integration            Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId])
+}
+
+model Invoice {
+  id             Int          @id @default(autoincrement())
+  adminProfileId Int
+  date           DateTime
+  amount         String
+  status         String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime
+  domainId       Int?
+  secureId       String?      @unique
+  tenantId       String?
+  AdminProfile   AdminProfile @relation(fields: [adminProfileId], references: [id])
+  Domain         Domain?      @relation(fields: [domainId], references: [id])
+  Tenant         Tenant?      @relation(fields: [tenantId], references: [id])
+
+  @@index([adminProfileId])
+  @@index([date])
+  @@index([domainId])
+  @@index([secureId])
+  @@index([status])
+  @@index([tenantId])
+}
+
+model KnowledgeBaseEntry {
+  id             Int              @id @default(autoincrement())
+  type           String
+  content        String?
+  fileName       String?
+  fileSize       Int?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime
+  domainId       Int?
+  secureId       String?          @unique
+  tenantId       String?
+  error          String?
+  status         String           @default("PENDING")
+  url            String?
+  enabled        Boolean          @default(true)
+  DocumentChunk  DocumentChunk[]
+  Domain         Domain?          @relation(fields: [domainId], references: [id])
+  Tenant         Tenant?          @relation(fields: [tenantId], references: [id])
+  llamaindexnode llamaindexnode[]
+
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([secureId])
+  @@index([tenantId])
+  @@index([type])
+}
+
+model Lead {
+  id               Int             @id @default(autoincrement())
+  name             String
+  email            String?
+  phone            String?
+  status           String          @default("new")
+  assignedToId     Int?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime
+  domainId         Int?
+  secureId         String?         @unique
+  visitorId        Int?
+  visitorSessionId Int?
+  tenantId         String?
+  aiAgentId        String?
+  metadata         Json?
+  Conversation     Conversation[]
+  Agent            Agent?          @relation(fields: [aiAgentId], references: [id])
+  User             User?           @relation(fields: [assignedToId], references: [id])
+  Domain           Domain?         @relation(fields: [domainId], references: [id])
+  Tenant           Tenant?         @relation(fields: [tenantId], references: [id])
+  Visitor          Visitor?        @relation(fields: [visitorId], references: [id])
+  VisitorSession   VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+  Note             Note[]
+
+  @@index([aiAgentId])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([email])
+  @@index([secureId])
+  @@index([status])
+  @@index([tenantId])
+  @@index([visitorSessionId])
+}
+
+model Note {
+  id               Int             @id @default(autoincrement())
+  leadId           Int
+  content          String
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime
+  domainId         Int?
+  secureId         String?         @unique
+  visitorSessionId Int?
+  tenantId         String?
+  Domain           Domain?         @relation(fields: [domainId], references: [id])
+  Lead             Lead            @relation(fields: [leadId], references: [id])
+  Tenant           Tenant?         @relation(fields: [tenantId], references: [id])
+  VisitorSession   VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([leadId])
+  @@index([secureId])
+  @@index([tenantId])
+  @@index([visitorSessionId])
+}
+
+model PaymentMethod {
+  id                       Int          @id @default(autoincrement())
+  adminProfileId           Int
+  customerPaymentProfileId String?
+  cardType                 String?
+  cardNumber               String
+  expiryDate               String
+  nameOnCard               String
+  country                  String
+  isDefault                Boolean      @default(false)
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime
+  domainId                 Int?
+  secureId                 String?      @unique
+  tenantId                 String?
+  AdminProfile             AdminProfile @relation(fields: [adminProfileId], references: [id])
+  Domain                   Domain?      @relation(fields: [domainId], references: [id])
+  Tenant                   Tenant?      @relation(fields: [tenantId], references: [id])
+
+  @@index([adminProfileId])
+  @@index([customerPaymentProfileId])
+  @@index([domainId])
+  @@index([isDefault])
+  @@index([secureId])
+  @@index([tenantId])
+}
+
+model Persona {
+  id                                                     String           @id
+  domainId                                               Int?             @unique
+  tenantId                                               String?
+  activeVersionId                                        String?          @unique
+  createdAt                                              DateTime         @default(now())
+  updatedAt                                              DateTime
+  PersonaVersion_Persona_activeVersionIdToPersonaVersion PersonaVersion?  @relation("Persona_activeVersionIdToPersonaVersion", fields: [activeVersionId], references: [id])
+  Domain                                                 Domain?          @relation(fields: [domainId], references: [id])
+  Tenant                                                 Tenant?          @relation(fields: [tenantId], references: [id])
+  PersonaVersion_PersonaVersion_personaIdToPersona       PersonaVersion[] @relation("PersonaVersion_personaIdToPersona")
+
+  @@index([domainId])
+  @@index([tenantId])
+}
+
+model PersonaVersion {
+  id                                              String   @id
+  personaId                                       String
+  name                                            String
+  tone                                            String   @default("professional")
+  language                                        String   @default("English")
+  instructions                                    String
+  status                                          String   @default("DRAFT")
+  version                                         Int      @default(1)
+  createdAt                                       DateTime @default(now())
+  Persona_Persona_activeVersionIdToPersonaVersion Persona? @relation("Persona_activeVersionIdToPersonaVersion")
+  Persona_PersonaVersion_personaIdToPersona       Persona  @relation("PersonaVersion_personaIdToPersona", fields: [personaId], references: [id], onDelete: Cascade)
+
+  @@index([personaId])
+}
+
+model Plan {
+  id                 Int            @id @default(autoincrement())
+  name               String
+  price              Decimal
+  conversationsLimit Int
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime
+  tenantId           String?
+  Tenant             Tenant?        @relation(fields: [tenantId], references: [id])
+  Subscription       Subscription[]
+
+  @@index([tenantId])
+}
+
+model Product {
+  id          String   @id
+  tenantId    String
+  domainId    Int?
+  name        String
+  description String?
+  price       String?
+  currency    String   @default("USD")
+  imageUrl    String?
+  productUrl  String?
+  category    String?
+  isActive    Boolean  @default(true)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime
+  Domain      Domain?  @relation(fields: [domainId], references: [id])
+  Tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([category])
+  @@index([domainId])
+  @@index([isActive])
+  @@index([tenantId])
+}
+
+model QuickQuestion {
+  id            Int      @id @default(autoincrement())
+  question      String
+  defaultAnswer String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime
+  domainId      Int?
+  secureId      String?  @unique
+  tenantId      String?
+  Domain        Domain?  @relation(fields: [domainId], references: [id])
+  Tenant        Tenant?  @relation(fields: [tenantId], references: [id])
+
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([secureId])
+  @@index([tenantId])
+}
+
+model Subscription {
+  id                      Int       @id @default(autoincrement())
+  userId                  Int
+  planId                  Int
+  authorizeSubscriptionId String?
+  status                  String    @default("pending")
+  nextBillingDate         DateTime?
+  currentPeriodStart      DateTime?
+  currentPeriodEnd        DateTime?
+  trialPeriodEnd          DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime
+  tenantId                String?
+  Plan                    Plan      @relation(fields: [planId], references: [id])
+  Tenant                  Tenant?   @relation(fields: [tenantId], references: [id])
+  User                    User      @relation(fields: [userId], references: [id])
+
+  @@index([nextBillingDate])
+  @@index([planId])
+  @@index([status])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model TeamMember {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  role      String   @default("member")
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  domainId  Int?
+  secureId  String?  @unique
+  tenantId  String?
+  Domain    Domain?  @relation(fields: [domainId], references: [id])
+  Tenant    Tenant?  @relation(fields: [tenantId], references: [id])
+  User      User     @relation(fields: [userId], references: [id])
+
+  @@index([domainId])
+  @@index([role])
+  @@index([secureId])
+  @@index([status])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model Tenant {
+  id                     String                   @id
+  name                   String
+  slug                   String                   @unique
+  status                 String                   @default("active")
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime
+  AdminProfile           AdminProfile[]
+  Agent                  Agent[]
+  AuditLog               AuditLog[]
+  Configuration          Configuration[]
+  Conversation           Conversation[]
+  ConversationEvaluation ConversationEvaluation[]
+  CrawledPage            CrawledPage[]
+  DocumentChunk          DocumentChunk[]
+  Domain                 Domain[]
+  GuardrailConfig        GuardrailConfig?
+  GuardrailLog           GuardrailLog[]
+  Integration            Integration[]
+  IntegrationLog         IntegrationLog[]
+  Invoice                Invoice[]
+  KnowledgeBaseEntry     KnowledgeBaseEntry[]
+  Lead                   Lead[]
+  Note                   Note[]
+  PaymentMethod          PaymentMethod[]
+  Persona                Persona[]
+  Plan                   Plan[]
+  Product                Product[]
+  QuickQuestion          QuickQuestion[]
+  Subscription           Subscription[]
+  TeamMember             TeamMember[]
+  TenantLimit            TenantLimit?
+  User                   User[]
+  UserSession            UserSession[]
+  Visitor                Visitor[]
+  VisitorSession         VisitorSession[]
+  VoipCall               VoipCall[]
+  VoipConfig             VoipConfig[]
+  WidgetConfig           WidgetConfig[]
+  llamaindexnode         llamaindexnode[]
+  Notification           Notification[]
+  Role                   Role[]
+  UserRole               UserRole[]
+}
+
+model TenantLimit {
+  id                    String   @id
+  tenantId              String   @unique
+  maxLeads              Int      @default(100)
+  maxConversations      Int      @default(1000)
+  maxStorage            BigInt   @default(104857600)
+  rateLimit             Int      @default(60)
+  maxConcurrentSessions Int      @default(5)
+  leadsUsed             Int      @default(0)
+  conversationsUsed     Int      @default(0)
+  storageUsed           BigInt   @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime
+  Tenant                Tenant   @relation(fields: [tenantId], references: [id])
+}
+
+model User {
+  id                       Int              @id @default(autoincrement())
+  name                     String
+  email                    String           @unique
+  password                 String
+  role                     String           @default("member")
+  status                   String           @default("active")
+  passwordResetToken       String?          @unique
+  passwordResetExpires     DateTime?
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime
+  phone                    String?
+  image                    String?
+  domainId                 Int?
+  lastLogin                DateTime?
+  authNetCustomerProfileId String?
+  authNetPaymentProfiles   Json?
+  tenantId                 String?
+  AdminProfile             AdminProfile?
+  AuditLog                 AuditLog[]
+  Lead                     Lead[]
+  Subscription             Subscription[]
+  TeamMember               TeamMember[]
+  Domain                   Domain?          @relation(fields: [domainId], references: [id])
+  Tenant                   Tenant?          @relation(fields: [tenantId], references: [id])
+  UserSession              UserSession[]
+  Visitor                  Visitor[]
+  VisitorSession           VisitorSession[]
+  Notification             Notification[]
+  UserRole                 UserRole[]
+
+  @@index([createdAt])
+  @@index([domainId])
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@index([tenantId])
+}
+
+model UserSession {
+  id           String   @id
+  userId       Int
+  tenantId     String?
+  token        String   @unique
+  ipAddress    String?
+  userAgent    String?
+  lastActivity DateTime @default(now())
+  expiresAt    DateTime
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  Tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  User         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([tenantId])
+  @@index([token])
+  @@index([userId])
+}
+
+model Visitor {
+  id             Int              @id @default(autoincrement())
+  secureId       String?          @unique
+  domainId       Int?
+  fbPixelId      String?
+  gaId           String?
+  userId         Int?
+  canTrackFb     Boolean          @default(false)
+  canTrackGa     Boolean          @default(false)
+  firstVisit     DateTime         @default(now())
+  lastActivity   DateTime
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime
+  tenantId       String?
+  Conversation   Conversation[]
+  Lead           Lead[]
+  Domain         Domain?          @relation(fields: [domainId], references: [id])
+  Tenant         Tenant?          @relation(fields: [tenantId], references: [id])
+  User           User?            @relation(fields: [userId], references: [id])
+  VisitorSession VisitorSession[]
+
+  @@index([domainId])
+  @@index([fbPixelId])
+  @@index([gaId])
+  @@index([secureId])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model VisitorSession {
+  id                     Int                      @id @default(autoincrement())
+  secureId               String?                  @unique
+  visitorId              Int
+  domainId               Int?
+  sessionId              String?
+  referrer               String?
+  landingPage            String?
+  utmSource              String?
+  utmMedium              String?
+  utmCampaign            String?
+  utmTerm                String?
+  utmContent             String?
+  startedAt              DateTime                 @default(now())
+  endedAt                DateTime?
+  duration               Int?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime
+  tenantId               String?
+  agentId                Int?
+  status                 String                   @default("AI")
+  aiAgentId              String?
+  Conversation           Conversation[]
+  ConversationEvaluation ConversationEvaluation[]
+  Lead                   Lead[]
+  Note                   Note[]
+  User                   User?                    @relation(fields: [agentId], references: [id])
+  Agent                  Agent?                   @relation(fields: [aiAgentId], references: [id])
+  Domain                 Domain?                  @relation(fields: [domainId], references: [id])
+  Tenant                 Tenant?                  @relation(fields: [tenantId], references: [id])
+  Visitor                Visitor                  @relation(fields: [visitorId], references: [id])
+  VoipCall               VoipCall[]
+
+  @@index([aiAgentId])
+  @@index([domainId])
+  @@index([tenantId])
+}
+
+model VoipCall {
+  id               String          @id
+  callSid          String          @unique
+  from             String
+  to               String
+  status           String          @default("initiated")
+  duration         Int?
+  recordingUrl     String?
+  visitorSessionId Int?
+  tenantId         String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime
+  aiAgentId        String?
+  Agent            Agent?          @relation(fields: [aiAgentId], references: [id])
+  Tenant           Tenant?         @relation(fields: [tenantId], references: [id])
+  VisitorSession   VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+
+  @@index([aiAgentId])
+  @@index([tenantId])
+  @@index([visitorSessionId])
+}
+
+model VoipConfig {
+  id          String   @id
+  phoneNumber String   @unique
+  provider    String   @default("twilio")
+  apiKey      String?
+  apiSecret   String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime
+  domainId    Int?     @unique
+  tenantId    String?
+  Domain      Domain?  @relation(fields: [domainId], references: [id])
+  Tenant      Tenant?  @relation(fields: [tenantId], references: [id])
+
+  @@index([domainId])
+  @@index([tenantId])
+}
+
+model WidgetConfig {
+  id                       Int      @id @default(autoincrement())
+  style                    String
+  allowLeadForm            Boolean  @default(true)
+  enableAiBrowser          Boolean  @default(true)
+  showQuickQuestions       Boolean  @default(false)
+  interactionLimit         Int      @default(5)
+  quickQuestionsMode       String   @default("auto")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime
+  domainId                 Int?
+  allowedCountries         String[] @default([])
+  isActive                 Boolean  @default(true)
+  tenantId                 String?
+  initialGreetingInitiator String   @default("AGENT")
+  initialGreetingMessage   String   @default("Hi! How can I help you today?")
+  defaultMode              String   @default("VOICE")
+  showPreSessionForm       Boolean  @default(true)
+  widgetMode               String   @default("BOTH")
+  Domain                   Domain?  @relation(fields: [domainId], references: [id])
+  Tenant                   Tenant?  @relation(fields: [tenantId], references: [id])
+
+  @@index([domainId])
+  @@index([tenantId])
+}
+
+model llamaindexnode {
+  id                 String                 @id @db.Uuid
+  external_id        String?
+  collection         String?
+  document           String?
+  metadata           Json?
+  embeddings         Unsupported("vector")?
+  tenant_id          String?
+  entry_id           Int?
+  KnowledgeBaseEntry KnowledgeBaseEntry?    @relation(fields: [entry_id], references: [id])
+  Tenant             Tenant?                @relation(fields: [tenant_id], references: [id])
+
+  @@index([collection], map: "idx_llamaindexnode_collection")
+  @@index([external_id], map: "idx_llamaindexnode_external_id")
+  @@index([entry_id])
+  @@index([tenant_id])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  tenantId  String?
+  userId    Int?
+  type      String
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  Tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  User      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model Role {
+  id             String           @id @default(uuid())
+  name           String
+  description    String?
+  tenantId       String?
+  isSystem       Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  Tenant         Tenant?          @relation(fields: [tenantId], references: [id])
+  RolePermission RolePermission[]
+  UserRole       UserRole[]
+
+  @@index([tenantId])
+}
+
+model Permission {
+  id             String           @id @default(uuid())
+  resource       String
+  action         String
+  description    String?
+  createdAt      DateTime         @default(now())
+  RolePermission RolePermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  permissionId String
+  createdAt    DateTime   @default(now())
+  Role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  Permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    Int
+  roleId    String
+  tenantId  String?
+  createdAt DateTime @default(now())
+  Role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  Tenant    Tenant?  @relation(fields: [tenantId], references: [id])
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId, tenantId])
+  @@index([userId])
+  @@index([roleId])
+  @@index([tenantId])
+}
+
