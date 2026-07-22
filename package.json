@@ -18,13 +18,16 @@
     "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.0",
+    "@fastify/websocket": "^11.3.0",
     "@prisma/client": "^5.17.0",
+    "@types/ws": "^8.18.1",
     "bcrypt": "^5.1.1",
     "dotenv": "^16.4.5",
     "fastify": "^5.10.0",
     "jsonwebtoken": "^9.0.2",
     "openai": "^6.48.0",
     "pg": "^8.22.0",
+    "ws": "^8.21.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {

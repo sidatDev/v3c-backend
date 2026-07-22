@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
+import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
 import authRoutes from './routes/auth';
 import rolesRoutes from './routes/roles';
@@ -18,6 +19,7 @@ import teamRoutes from './routes/team';
 import domainRoutes from './routes/domain';
 import accountRoutes from './routes/account';
 import notificationsRoutes from './routes/notifications';
+import publicRoutes from './routes/public';
 import { errorHandler } from './middleware/error';
 import { auditLoggerHook } from './middleware/audit';
 
@@ -27,15 +29,16 @@ const app = Fastify({
 
 // 1. Register CORS
 app.register(cors, {
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', /\.vercel\.app$/],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 });
 
-// 2. Register Cookie Parser & Multipart
+// 2. Register Cookie Parser, Multipart, and WebSocket
 app.register(cookie);
 app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
+app.register(websocket);
 
 // 3. Register Global Audit Logger Hook
 app.addHook('onResponse', auditLoggerHook);
@@ -52,6 +55,7 @@ app.register(teamRoutes, { prefix: '/api/team' });
 app.register(domainRoutes, { prefix: '/api/domain' });
 app.register(accountRoutes, { prefix: '/api/account' });
 app.register(notificationsRoutes, { prefix: '/api/notifications' });
+app.register(publicRoutes, { prefix: '/api/public' });
 
 // Health Check
 app.get('/health', async (request, reply) => {

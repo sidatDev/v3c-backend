@@ -87,11 +87,25 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
 
     for (const item of updates) {
       if (item.val !== undefined && item.val !== null) {
-        await prisma.configuration.upsert({
-          where: { key_domainId: { key: item.key, domainId: 0 } },
-          update: { value: item.val, tenantId, updatedAt: new Date() },
-          create: { key: item.key, value: item.val, tenantId, domainId: 0, updatedAt: new Date() }
+        const existingConfig = await prisma.configuration.findFirst({
+          where: { key: item.key, tenantId }
         });
+
+        if (existingConfig) {
+          await prisma.configuration.update({
+            where: { id: existingConfig.id },
+            data: { value: item.val, updatedAt: new Date() }
+          });
+        } else {
+          await prisma.configuration.create({
+            data: {
+              key: item.key,
+              value: item.val,
+              tenantId,
+              updatedAt: new Date()
+            }
+          });
+        }
       }
     }
 
