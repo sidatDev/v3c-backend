@@ -64,17 +64,29 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       }
     });
 
-    // Generate RAG chunks
+    // Generate RAG chunks & vector embeddings
     const chunks = chunkText(content);
     for (const chunk of chunks) {
+      const chunkId = randomUUID();
       await prisma.documentChunk.create({
         data: {
-          id: randomUUID(),
+          id: chunkId,
           content: chunk,
           entryId: entry.id,
           tenantId: tenantId || null
         }
       });
+
+      // Generate embedding and save to pgvector column
+      try {
+        const embedding = await generateEmbedding(chunk);
+        const embeddingSql = `[${embedding.join(',')}]`;
+        await prisma.$executeRawUnsafe(
+          `UPDATE "DocumentChunk" SET embedding = '${embeddingSql}'::vector WHERE id = '${chunkId}'`
+        );
+      } catch (err) {
+        console.warn('Vector embedding generation failed for chunk, raw text will still be used in full prompt:', err);
+      }
     }
 
     reply.status(201);
