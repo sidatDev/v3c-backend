@@ -607,10 +607,10 @@ Return ONLY a valid JSON array of strings, for example:
       }
 
       // 1. Send GA session configuration
-      // NOTE: Per OpenAI Realtime GA spec, voice MUST be at session root (not audio.output.voice)
       const sessionConfig = {
         type: 'session.update',
         session: {
+          type: 'realtime',
           voice: selectedVoice,
           instructions: `${systemPrompt}\nLanguage Instruction: You MUST respond ONLY in ${language}. Do not switch languages.`,
           input_audio_format: 'pcm16',
