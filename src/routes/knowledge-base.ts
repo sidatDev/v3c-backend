@@ -6,6 +6,8 @@ import { AppError } from '../middleware/error';
 import { uploadFileToS3, deleteFileFromS3 } from '../utils/s3';
 import { generateEmbedding, chunkText } from '../utils/openai';
 import { randomUUID } from 'crypto';
+import { TenantConfigCache } from '../services/cache/TenantConfigCache';
+import { FirecrawlService } from '../services/ai/FirecrawlService';
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (!a || !b || a.length !== b.length || a.length === 0) return 0;
@@ -89,6 +91,8 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       }
     }
 
+    TenantConfigCache.invalidate(tenantId || undefined);
+
     reply.status(201);
     return { status: 'success', data: entry };
   });
@@ -106,6 +110,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     }
 
     await prisma.knowledgeBaseEntry.delete({ where: { id } });
+    TenantConfigCache.invalidate(tenantId || undefined);
     return { status: 'success', message: 'Entry deleted successfully.' };
   });
 
@@ -239,64 +244,12 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     const { url } = request.body as any;
 
     if (!url) throw new AppError('URL is required.', 400);
+    if (!tenantId) throw new AppError('Tenant context missing.', 400);
 
-    // Create or update record
-    const crawled = await prisma.crawledPage.upsert({
-      where: { url },
-      update: {
-        status: 'PENDING',
-        tenantId,
-        updatedAt: new Date()
-      },
-      create: {
-        url,
-        tenantId,
-        status: 'PENDING',
-        enabled: true,
-        updatedAt: new Date()
-      }
-    });
-
-    // Fetch crawler
-    try {
-      const response = await fetch(url, { headers: { 'User-Agent': 'V3C-Bot/1.0' } });
-      if (response.ok) {
-        const html = await response.text();
-        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : url;
-        const textContent = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        await prisma.crawledPage.update({
-          where: { id: crawled.id },
-          data: {
-            title,
-            content: textContent.substring(0, 10000),
-            status: 'COMPLETED',
-            lastCrawled: new Date(),
-            updatedAt: new Date()
-          }
-        });
-      } else {
-        await prisma.crawledPage.update({
-          where: { id: crawled.id },
-          data: { status: 'FAILED', error: `HTTP ${response.status}`, updatedAt: new Date() }
-        });
-      }
-    } catch (err: any) {
-      await prisma.crawledPage.update({
-        where: { id: crawled.id },
-        data: { status: 'FAILED', error: err.message || 'Crawl error', updatedAt: new Date() }
-      });
-    }
-
-    const updated = await prisma.crawledPage.findUnique({ where: { id: crawled.id } });
+    const result = await FirecrawlService.crawlUrl(url, tenantId);
 
     reply.status(201);
-    return { status: 'success', data: updated };
+    return { status: 'success', data: result.page };
   });
 
   // @route   PUT /api/kb/sitemap/:id/toggle

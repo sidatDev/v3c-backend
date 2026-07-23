@@ -1,0 +1,97 @@
+import { TenantConfig } from '../cache/TenantConfigCache';
+
+export interface PromptBuildParams {
+  tenantConfig: TenantConfig;
+  retrievedContext?: string;
+  summary?: string;
+  recentMessages?: { sender: 'visitor' | 'ai' | 'user' | 'assistant'; message: string }[];
+  currentMessage?: string;
+  language?: string;
+}
+
+export class PromptService {
+  /**
+   * Constructs the unified system prompt & messages array for AI completion/orchestration
+   */
+  static buildSystemPrompt(params: PromptBuildParams): string {
+    const { tenantConfig, retrievedContext, summary, language = 'en' } = params;
+    const { agent, personaPrompt, guardrailsPrompt } = tenantConfig;
+
+    const basePrompt = agent.systemPrompt || 'You are a helpful AI Virtual Customer Assistant.';
+
+    const langInstruction = language === 'ur' || language === 'Urdu'
+      ? 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script.'
+      : 'CRITICAL: You MUST respond ONLY in English.';
+
+    // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
+    const capTokens = (text: string, maxTokens: number): string => {
+      const maxChars = maxTokens * 4;
+      if (!text || text.length <= maxChars) return text;
+      return text.substring(0, maxChars) + '... [truncated]';
+    };
+
+    let promptParts: string[] = [];
+
+    // 1. Base System Prompt (<800 tokens)
+    promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 800)}`);
+
+    // 2. Language Constraint
+    promptParts.push(`### Language Rule:\n${langInstruction}`);
+
+    // 3. Business Persona (if configured, <300 tokens)
+    if (personaPrompt && personaPrompt.trim()) {
+      promptParts.push(`### Persona & Tone Guidelines:\n${capTokens(personaPrompt, 300)}`);
+    }
+
+    // 4. Guardrails & Fallback Protocol (~200 tokens)
+    if (guardrailsPrompt && guardrailsPrompt.trim()) {
+      promptParts.push(`### Safety, Guardrails & Policy Protocol:\n${capTokens(guardrailsPrompt, 200)}`);
+    }
+
+    // 5. Conversation Summary (if exists from rolling memory, <300 tokens)
+    if (summary && summary.trim()) {
+      promptParts.push(`### Conversation History Summary:\n${capTokens(summary, 300)}`);
+    }
+
+    // 6. Ground Truth Retrieved Context (RAG, <1000 tokens)
+    if (retrievedContext && retrievedContext.trim()) {
+      promptParts.push(`### CRITICAL RULE — Ground Truth Knowledge Base Context (MUST FOLLOW):\n` +
+        `You have been provided with official reference knowledge below. You MUST:\n` +
+        `1. Answer using ONLY the information from this knowledge base when relevant.\n` +
+        `2. Reproduce exact details and facts without making up policies.\n` +
+        `3. If the question is outside this context, follow the guardrails protocol.\n\n` +
+        `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
+    } else {
+      promptParts.push(`### Knowledge Base Context:\nNo specific reference knowledge found for this query. Use established tenant guardrails.`);
+    }
+
+    return promptParts.join('\n\n').trim();
+  }
+
+  /**
+   * Format full chat completion messages payload
+   */
+  static buildMessages(params: PromptBuildParams): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+    const systemPrompt = this.buildSystemPrompt(params);
+    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+      { role: 'system', content: systemPrompt }
+    ];
+
+    if (params.recentMessages && params.recentMessages.length > 0) {
+      for (const msg of params.recentMessages) {
+        const role = msg.sender === 'visitor' || msg.sender === 'user' ? 'user' : 'assistant';
+        messages.push({ role, content: msg.message });
+      }
+    }
+
+    if (params.currentMessage && params.currentMessage.trim()) {
+      // Only push if last message in recentMessages isn't identical
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user' || last.content !== params.currentMessage.trim()) {
+        messages.push({ role: 'user', content: params.currentMessage.trim() });
+      }
+    }
+
+    return messages;
+  }
+}

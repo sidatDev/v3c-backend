@@ -4,6 +4,8 @@ import { randomUUID } from 'crypto';
 import prisma from '../lib/prisma';
 import { AppError } from '../middleware/error';
 import { openai, generateEmbedding } from '../utils/openai';
+import { ChatService } from '../services/ai/ChatService';
+import { VoiceService } from '../services/ai/VoiceService';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -263,155 +265,19 @@ ${snippets}`;
       throw new AppError('Message content cannot be empty', 400);
     }
 
-    const { tenantId, agent } = await validatePublicAccess(publicKey, agentId);
-
-    // 1. Save Visitor Message to DB if sessionId provided
-    let dbSession = null;
-    let leadIdToUse: number | null = null;
-
-    if (sessionId) {
-      dbSession = await prisma.visitorSession.findFirst({
-        where: { id: Number(sessionId), tenantId }
-      });
-
-      if (dbSession) {
-        // Find existing lead or create an anonymous lead for this session
-        let lead = await prisma.lead.findFirst({
-          where: { visitorSessionId: dbSession.id }
-        });
-
-        if (!lead) {
-          lead = await prisma.lead.create({
-            data: {
-              name: 'Visitor Lead',
-              tenantId,
-              aiAgentId: agent.id,
-              visitorId: dbSession.visitorId,
-              visitorSessionId: dbSession.id,
-              status: 'new',
-              updatedAt: new Date()
-            }
-          });
-        }
-        leadIdToUse = lead.id;
-
-        await prisma.conversation.create({
-          data: {
-            tenantId,
-            aiAgentId: agent.id,
-            visitorId: dbSession.visitorId,
-            visitorSessionId: dbSession.id,
-            sender: 'visitor',
-            message: message.trim(),
-            leadId: leadIdToUse
-          }
-        });
-      }
-    }
-
-    // 2. Perform RAG Search against DocumentChunk / CrawledPage embeddings
-    let contextText = '';
-    const sources: { title: string; url?: string }[] = [];
-
-    try {
-      const queryEmbedding = await generateEmbedding(message);
-      const embeddingSql = `[${queryEmbedding.join(',')}]`;
-
-      const vectorResults: any[] = await prisma.$queryRawUnsafe(`
-        SELECT id, content, metadata, 1 - (embedding <=> '${embeddingSql}'::vector) as similarity
-        FROM "DocumentChunk"
-        WHERE "tenantId" = '${tenantId}' AND embedding IS NOT NULL
-        ORDER BY embedding <=> '${embeddingSql}'::vector ASC
-        LIMIT 8;
-      `);
-
-      if (vectorResults && vectorResults.length > 0) {
-        const filtered = vectorResults.filter(r => r.similarity > 0.1);
-        if (filtered.length > 0) {
-          contextText = filtered.map(r => r.content).join('\n---\n');
-          filtered.forEach(r => {
-            if (r.metadata && (r.metadata as any).filename) {
-              sources.push({ title: (r.metadata as any).filename });
-            } else if (r.metadata && (r.metadata as any).title) {
-              sources.push({ title: (r.metadata as any).title, url: (r.metadata as any).url });
-            }
-          });
-        }
-      }
-    } catch (err) {
-      console.warn('RAG embedding search failed, continuing with fallback:', err);
-    }
-
-    // Fallback: If vector search returned no context, load raw KnowledgeBaseEntry snippets for tenant
-    if (!contextText || contextText.trim() === '') {
-      try {
-        const kbEntries = await prisma.knowledgeBaseEntry.findMany({
-          where: { tenantId, enabled: true },
-          orderBy: { createdAt: 'desc' },
-          take: 5
-        });
-        if (kbEntries && kbEntries.length > 0) {
-          contextText = kbEntries
-            .map(e => `[${e.fileName || 'Knowledge Source'}]\n${e.content}`)
-            .join('\n---\n');
-          if (contextText.length > 6000) {
-            contextText = contextText.substring(0, 6000);
-          }
-        }
-      } catch (err) {
-        console.warn('Fallback KB fetch failed:', err);
-      }
-    }
-
-    // 3. Construct System Prompt with Language Constraints
-    const languageInstruction = language === 'ur'
-      ? 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script.'
-      : 'CRITICAL: You MUST respond ONLY in English.';
-
-    const systemPrompt = `
-${agent.systemPrompt || 'You are a helpful customer support assistant for V3C.'}
-
-${languageInstruction}
-
-Use the following reference knowledge base context to answer user questions when applicable:
-${contextText || 'No relevant knowledge base context found.'}
-
-If you don't know the answer, politely offer to assist or escalate to a human agent. Keep responses clear, professional, and concise.
-`.trim();
-
-    // 4. Generate AI Response via OpenAI Chat Completions
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: message }
-      ],
-      temperature: 0.7,
-      max_tokens: 500
+    const result = await ChatService.handleChat({
+      sessionId: sessionId ? Number(sessionId) : undefined,
+      agentId,
+      publicKey,
+      message,
+      language
     });
-
-    const aiReply = completion.choices[0]?.message?.content || 'I am sorry, I could not generate a response right now.';
-
-    // 5. Save AI Reply to DB
-    if (dbSession && leadIdToUse) {
-      await prisma.conversation.create({
-        data: {
-          tenantId,
-          aiAgentId: agent.id,
-          visitorId: dbSession.visitorId,
-          visitorSessionId: dbSession.id,
-          sender: 'ai',
-          message: aiReply,
-          leadId: leadIdToUse
-        }
-      });
-    }
 
     return {
       status: 'success',
       data: {
-        reply: aiReply,
-        sources: Array.from(new Set(sources.map(s => JSON.stringify(s)))).map(s => JSON.parse(s))
+        reply: result.reply,
+        sources: result.sources
       }
     };
   });
@@ -571,125 +437,6 @@ Return ONLY a valid JSON array of strings, for example:
       language?: string;
     };
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      socket.send(JSON.stringify({ type: 'error', message: 'OpenAI API Key not configured on server' }));
-      socket.close();
-      return;
-    }
-
-    const language = query.language === 'ur' ? 'Urdu' : 'English';
-
-    // Establish WebSocket connection to OpenAI Realtime GA API
-    const openAiUrl = 'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini';
-    const openAiWs = new WebSocket(openAiUrl, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`
-      }
-    });
-
-    openAiWs.on('open', async () => {
-      console.log('[V3C Realtime] Connected to OpenAI Realtime GA API');
-
-      let selectedVoice = 'alloy';
-      let systemPrompt = 'You are an AI Virtual Customer Assistant. Answer questions accurately and politely.';
-      let greetingMessage = 'Hello! How can I help you today?';
-
-      try {
-        const { agent, combinedSystemPrompt } = await validatePublicAccess(query.publicKey, query.agentId);
-        if (agent.voice) selectedVoice = agent.voice.toLowerCase();
-        if (combinedSystemPrompt) systemPrompt = combinedSystemPrompt;
-        if ((agent as any).initialGreetingMessage) greetingMessage = (agent as any).initialGreetingMessage;
-        console.log(`[V3C Realtime] Agent: ${agent.name} | Voice: ${selectedVoice} | Greeting: ${greetingMessage}`);
-        console.log(`[V3C Realtime] System prompt length: ${systemPrompt.length} chars`);
-      } catch (err) {
-        console.warn('[V3C Realtime] Using defaults for voice & system prompt:', err);
-      }
-
-      // 1. Send GA session configuration
-      const sessionConfig = {
-        type: 'session.update',
-        session: {
-          type: 'realtime',
-          voice: selectedVoice,
-          instructions: `${systemPrompt}\nLanguage Instruction: You MUST respond ONLY in ${language}. Do not switch languages.`,
-          input_audio_format: 'pcm16',
-          output_audio_format: 'pcm16',
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 500
-          }
-        }
-      };
-      openAiWs.send(JSON.stringify(sessionConfig));
-      console.log(`[V3C Realtime] Session configured. voice=${selectedVoice}`);
-
-      // 2. Trigger opening greeting from server side after a short delay (prevents race condition)
-      setTimeout(() => {
-        if (openAiWs.readyState === WebSocket.OPEN) {
-          const greetingText = greetingMessage || 'Hello! How can I help you today?';
-          const greetingPrompt = language === 'Urdu'
-            ? `براہ کرم سلام کہیں اور کہیں: "${greetingText}"`
-            : `Please greet the visitor warmly using this exact message: "${greetingText}"`;
-
-          openAiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'message',
-              role: 'user',
-              content: [{ type: 'input_text', text: greetingPrompt }],
-            },
-          }));
-
-          openAiWs.send(JSON.stringify({ type: 'response.create' }));
-          console.log('[V3C Realtime] Greeting triggered from server after delay.');
-
-          // Notify browser that session is ready
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'session.ready' }));
-          }
-        }
-      }, 600);
-    });
-
-    // Forward messages from Browser -> OpenAI
-    socket.on('message', (message: WebSocket.RawData) => {
-      if (openAiWs.readyState === WebSocket.OPEN) {
-        openAiWs.send(message.toString());
-      }
-    });
-
-    // Forward messages from OpenAI -> Browser
-    openAiWs.on('message', (data: WebSocket.RawData) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(data.toString());
-      }
-    });
-
-    // Handle Socket closures and errors
-    socket.on('close', () => {
-      if (openAiWs.readyState === WebSocket.OPEN) {
-        openAiWs.close();
-      }
-    });
-
-    openAiWs.on('close', () => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.close();
-      }
-    });
-
-    openAiWs.on('error', (err: any) => {
-      console.error('OpenAI Realtime WS Error:', err?.message || err);
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'error', message: err?.message || 'OpenAI WS error' }));
-      }
-    });
-
-    socket.on('error', (err: any) => {
-      console.error('Browser Client WS Error:', err?.message || err);
-    });
+    VoiceService.handleRealtimeSession(socket, query);
   });
 }
