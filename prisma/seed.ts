@@ -1,4 +1,6 @@
 import { PrismaClient } from '@prisma/client';
+import dotenv from 'dotenv';
+dotenv.config();
 import { DEFAULT_PERMISSIONS, RESOURCES, ACTIONS } from '../src/constants/permissions';
 
 const prisma = new PrismaClient();

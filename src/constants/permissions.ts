@@ -11,6 +11,7 @@ export const RESOURCES = {
   BILLING: 'billing',
   ACCOUNT: 'account',
   NOTIFICATIONS: 'notifications',
+  AI_SEARCH: 'ai_search',
 } as const;
 
 export const ACTIONS = {
@@ -83,4 +84,8 @@ export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
   // Notifications
   { resource: 'notifications', action: 'view', description: 'View notifications' },
   { resource: 'notifications', action: 'manage', description: 'Clear and configure notifications' },
+
+  // AI Search
+  { resource: 'ai_search', action: 'view', description: 'View AI search setups and logs' },
+  { resource: 'ai_search', action: 'manage', description: 'Configure websites, keys, limits and trigger crawl jobs' },
 ];
