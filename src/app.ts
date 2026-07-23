@@ -20,6 +20,10 @@ import domainRoutes from './routes/domain';
 import accountRoutes from './routes/account';
 import notificationsRoutes from './routes/notifications';
 import aiSearchRoutes from './routes/ai-search';
+import agentsRoutes from './routes/agents';
+import inboxRoutes from './routes/inbox';
+import aiLogsRoutes from './routes/ai-logs';
+import analyticsRoutes from './routes/analytics';
 import publicRoutes from './routes/public';
 import { errorHandler } from './middleware/error';
 import { auditLoggerHook } from './middleware/audit';
@@ -29,11 +33,23 @@ const app = Fastify({
 });
 
 // 1. Register CORS
+const allowedOrigins: (string | RegExp)[] = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  /\.vercel\.app$/,
+  /\.sidattech\.com$/
+];
+
+if (process.env.ADMIN_PANEL_URL) {
+  allowedOrigins.push(process.env.ADMIN_PANEL_URL);
+}
+
 app.register(cors, {
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', /\.vercel\.app$/],
+  origin: allowedOrigins,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
 });
 
 // 2. Register Cookie Parser, Multipart, and WebSocket
@@ -57,6 +73,10 @@ app.register(domainRoutes, { prefix: '/api/domain' });
 app.register(accountRoutes, { prefix: '/api/account' });
 app.register(notificationsRoutes, { prefix: '/api/notifications' });
 app.register(aiSearchRoutes, { prefix: '/api/ai-search' });
+app.register(agentsRoutes, { prefix: '/api/agents' });
+app.register(inboxRoutes, { prefix: '/api/inbox' });
+app.register(aiLogsRoutes, { prefix: '/api/ai-logs' });
+app.register(analyticsRoutes, { prefix: '/api/analytics' });
 app.register(publicRoutes, { prefix: '/api/public' });
 
 // Health Check

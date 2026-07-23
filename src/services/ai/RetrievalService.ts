@@ -15,23 +15,49 @@ export interface RetrievalResult {
   contextText: string;
   sources: { title: string; url?: string }[];
   avgSimilarity: number;
+  topSimilarity: number;
+  fallbackTriggered: boolean;
+  /**
+   * Timing breakdown for latency instrumentation.
+   * All values are milliseconds since the search() call began.
+   */
+  timings: {
+    embeddingMs: number;
+    vectorSearchMs: number;
+    totalMs: number;
+  };
 }
 
 export class RetrievalService {
   /**
-   * Perform vector search and fallback retrieval for a tenant & user query
+   * Perform vector search and fallback retrieval for a tenant & user query.
+   * Instruments each phase with precise ms timings.
    */
-  static async search(tenantId: string, query: string, topK: number = 5, minSimilarity: number = 0.1): Promise<RetrievalResult> {
-    const startTime = Date.now();
+  static async search(
+    tenantId: string,
+    query: string,
+    topK: number = 5,
+    minSimilarity: number = 0.3,
+    maxContextTokens: number = 1000
+  ): Promise<RetrievalResult> {
+    const t0 = Date.now();
     const chunks: RetrievedChunk[] = [];
     const sourcesMap: Map<string, { title: string; url?: string }> = new Map();
+    let topSimilarity = 0;
+    let embeddingMs = 0;
+    let vectorSearchMs = 0;
 
     try {
+      // ── Phase 1: Generate embedding ─────────────────────────────────────────
+      const tEmbed0 = Date.now();
       const queryEmbedding = await generateEmbedding(query);
-      
+      embeddingMs = Date.now() - tEmbed0;
+
       if (queryEmbedding && queryEmbedding.length > 0) {
         const embeddingSql = `[${queryEmbedding.join(',')}]`;
 
+        // ── Phase 2: pgvector cosine search ──────────────────────────────────
+        const tVec0 = Date.now();
         const vectorResults: any[] = await prisma.$queryRawUnsafe(`
           SELECT id, content, metadata, 1 - (embedding <=> '${embeddingSql}'::vector) as similarity
           FROM "DocumentChunk"
@@ -39,8 +65,10 @@ export class RetrievalService {
           ORDER BY embedding <=> '${embeddingSql}'::vector ASC
           LIMIT ${topK};
         `);
+        vectorSearchMs = Date.now() - tVec0;
 
         if (vectorResults && vectorResults.length > 0) {
+          topSimilarity = parseFloat(vectorResults[0].similarity) || 0;
           for (const res of vectorResults) {
             const sim = parseFloat(res.similarity) || 0;
             if (sim >= minSimilarity) {
@@ -67,29 +95,26 @@ export class RetrievalService {
         }
       }
     } catch (err: any) {
-      StructuredLogger.warn('[RetrievalService] Vector search failed, attempting fallback', {
+      StructuredLogger.warn('[RetrievalService] Vector search failed', {
         tenantId,
         error: err?.message || err
       });
     }
 
-    // Fallback: If vector search returned 0 results, load raw KnowledgeBaseEntry snippets for tenant
-    if (chunks.length === 0) {
+    const fallbackTriggered = chunks.length === 0;
+
+    // Fallback: If vector search returned 0 results matching similarity threshold
+    if (fallbackTriggered) {
       try {
         const kbEntries = await prisma.knowledgeBaseEntry.findMany({
           where: { tenantId, enabled: true },
           orderBy: { createdAt: 'desc' },
-          take: 5
+          take: 3
         });
 
         for (const entry of kbEntries) {
           if (entry.content && entry.content.trim()) {
             const title = entry.fileName || 'Knowledge Base Entry';
-            chunks.push({
-              content: entry.content,
-              similarity: 0.5, // default baseline score for full match
-              sourceTitle: title
-            });
             sourcesMap.set(title, { title });
           }
         }
@@ -106,19 +131,34 @@ export class RetrievalService {
     const totalSim = chunks.reduce((acc, c) => acc + c.similarity, 0);
     const avgSimilarity = chunks.length > 0 ? totalSim / chunks.length : 0;
 
-    const latencyMs = Date.now() - startTime;
+    const maxChars = maxContextTokens * 4;
+    const truncatedContext = contextText.length > maxChars ? contextText.substring(0, maxChars) + '\n[... truncated ...]' : contextText;
+
+    const totalMs = Date.now() - t0;
+    const timings = { embeddingMs, vectorSearchMs, totalMs };
+
     StructuredLogger.info('[RetrievalService] Search completed', {
       tenantId,
       retrievedChunks: chunks.length,
+      topSimilarity,
       avgSimilarity,
-      latencyMs
+      fallbackTriggered,
+      timings
     });
+
+    // Latency budget warning
+    if (totalMs > 400) {
+      console.warn(`[RetrievalService] ⚠ LATENCY BUDGET EXCEEDED: total=${totalMs}ms (embedding=${embeddingMs}ms, pgvector=${vectorSearchMs}ms). Target: <400ms`);
+    }
 
     return {
       chunks,
-      contextText: contextText.length > 6000 ? contextText.substring(0, 6000) + '\n[... truncated ...]' : contextText,
+      contextText: truncatedContext,
       sources,
-      avgSimilarity
+      avgSimilarity,
+      topSimilarity,
+      fallbackTriggered,
+      timings
     };
   }
 }

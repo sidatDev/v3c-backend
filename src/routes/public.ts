@@ -145,6 +145,33 @@ ${snippets}`;
     return { domain, tenant, agent, widgetConfig, tenantId, combinedSystemPrompt };
   }
 
+  // @route   GET /api/public/domains
+  // @desc    Get all registered domains and tenant slugs for public selector
+  fastify.get('/domains', async (request, reply) => {
+    const domains = await prisma.domain.findMany({
+      include: {
+        Tenant: {
+          select: { id: true, name: true, slug: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return {
+      status: 'success',
+      data: domains.map(d => ({
+        id: d.id,
+        domain: d.domain,
+        publicKey: d.publicKey,
+        tenant: d.Tenant ? {
+          id: d.Tenant.id,
+          name: d.Tenant.name,
+          slug: d.Tenant.slug
+        } : null
+      }))
+    };
+  });
+
   // @route   GET /api/public/widget
   // @desc    Get widget configuration & tenant metadata for public embedding
   fastify.get('/widget', async (request, reply) => {
@@ -155,6 +182,16 @@ ${snippets}`;
     const quickQuestions = await prisma.quickQuestion.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'asc' }
+    });
+
+    const retrievalConfig = await prisma.retrievalConfig.findFirst({
+      where: { agentId: agent.id }
+    });
+
+    const topicLinks = await prisma.agentTopicLink.findMany({
+      where: { tenantId, isActive: true },
+      orderBy: { displayOrder: 'asc' },
+      take: 5
     });
 
     // Check if domain/widget is active
@@ -178,7 +215,18 @@ ${snippets}`;
           defaultMode: agent.defaultMode || 'VOICE',
           widgetMode: agent.widgetMode || 'BOTH',
           accentColor: agent.accentColor || '#bef264',
-          launcherStyle: agent.launcherStyle || 'orb'
+          launcherStyle: agent.launcherStyle || 'orb',
+          speechSpeed: agent.speechSpeed || 1.0,
+          autoLanguageDetection: agent.autoLanguageDetection ?? true,
+          supportedLanguages: agent.supportedLanguages || ['English'],
+          retrievalConfig: retrievalConfig ? {
+            similarityThreshold: retrievalConfig.similarityThreshold,
+            topK: retrievalConfig.topK,
+            fallbackMode: retrievalConfig.fallbackMode,
+            fallbackMessage: retrievalConfig.fallbackMessage,
+            fallbackMessageUrdu: retrievalConfig.fallbackMessageUrdu
+          } : null,
+          topicLinks: topicLinks.map(t => ({ id: t.id, title: t.title, url: t.url }))
         },
         widget: {
           isActive,
@@ -277,7 +325,9 @@ ${snippets}`;
       status: 'success',
       data: {
         reply: result.reply,
-        sources: result.sources
+        sources: result.sources,
+        fallbackTriggered: result.fallbackTriggered,
+        topicLinks: result.topicLinks
       }
     };
   });

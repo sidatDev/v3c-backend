@@ -1,5 +1,6 @@
 import { openai } from '../../utils/openai';
 import { StructuredLogger } from '../logger/StructuredLogger';
+import { AiLogService } from '../logger/AiLogService';
 
 export interface CompletionRequest {
   model?: string;
@@ -7,6 +8,7 @@ export interface CompletionRequest {
   temperature?: number;
   maxTokens?: number;
   tenantId?: string;
+  agentId?: string;
   sessionId?: string | number;
   mode?: 'chat' | 'voice';
 }
@@ -54,6 +56,21 @@ export class AiGateway {
           latencyMs,
           model
         });
+
+        if (request.tenantId) {
+          const userMessage = request.messages.find(m => m.role === 'user')?.content;
+          AiLogService.logRequest({
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            visitorSessionId: request.sessionId ? Number(request.sessionId) : undefined,
+            mode: request.mode || 'chat',
+            userQuery: userMessage,
+            modelUsed: model,
+            promptTokens,
+            completionTokens,
+            latencyMs
+          });
+        }
 
         return {
           reply,

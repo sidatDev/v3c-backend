@@ -5,6 +5,7 @@ import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
 import { openai } from '../utils/openai';
+import { TenantConfigCache } from '../services/cache/TenantConfigCache';
 
 export default async function widgetRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -154,6 +155,8 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
       details: { voice: updatedAgent.voice, isActive: updatedWidget.isActive }
     };
 
+    if (tenantId) TenantConfigCache.invalidate(tenantId);
+
     return {
       status: 'success',
       data: {
@@ -199,6 +202,8 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
       }
     });
 
+    if (tenantId) TenantConfigCache.invalidate(tenantId);
+
     reply.status(201);
     return {
       status: 'success',
@@ -222,6 +227,8 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
     }
 
     await prisma.quickQuestion.delete({ where: { id } });
+
+    if (tenantId) TenantConfigCache.invalidate(tenantId);
 
     return {
       status: 'success',

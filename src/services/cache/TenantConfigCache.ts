@@ -43,7 +43,8 @@ export class TenantConfigCache {
     let agent = null;
     if (agentId) {
       agent = await prisma.agent.findFirst({
-        where: { id: agentId }
+        where: { id: agentId },
+        include: { RetrievalConfig: true }
       });
       if (agent && !tenantId) {
         tenantId = agent.tenantId;
@@ -52,16 +53,19 @@ export class TenantConfigCache {
 
     if (!agent && tenantId) {
       agent = await prisma.agent.findFirst({
-        where: { tenantId }
+        where: { tenantId },
+        include: { RetrievalConfig: true }
       });
     }
 
     // Fallback agent lookup if missing
     if (!agent) {
       agent = await prisma.agent.findFirst({
-        where: { name: { contains: 'V3C' } }
+        where: { name: { contains: 'V3C' } },
+        include: { RetrievalConfig: true }
       }) || await prisma.agent.findFirst({
-        where: { isActive: true }
+        where: { isActive: true },
+        include: { RetrievalConfig: true }
       });
       if (agent) {
         tenantId = agent.tenantId;

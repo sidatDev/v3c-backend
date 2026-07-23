@@ -1,3 +1,4 @@
+import prisma from '../../lib/prisma';
 import { TenantConfigCache } from '../cache/TenantConfigCache';
 import { ConversationService } from './ConversationService';
 import { RetrievalService } from './RetrievalService';
@@ -15,6 +16,8 @@ export interface ChatParams {
 export interface ChatResult {
   reply: string;
   sources: { title: string; url?: string }[];
+  fallbackTriggered?: boolean;
+  topicLinks?: { title: string; url: string }[];
 }
 
 export class ChatService {
@@ -56,25 +59,65 @@ export class ChatService {
     }
 
     // 3. Perform Retrieval-Augmented Generation (RAG)
-    const retrievalResult = await RetrievalService.search(tenantId, message, 5, 0.1);
+    const threshold = agent.RetrievalConfig?.similarityThreshold ?? 0.3;
+    const retrievalResult = await RetrievalService.search(tenantId, message, 5, threshold);
 
-    // 4. Construct Unified System Prompt & Messages
-    const messages = PromptService.buildMessages({
-      tenantConfig,
-      retrievedContext: retrievalResult.contextText,
-      summary,
-      recentMessages,
-      currentMessage: message,
-      language
-    });
+    let reply = '';
+    let topicLinks: { title: string; url: string }[] = [];
 
-    // 5. Execute AI Completion via AiGateway
-    const completion = await AiGateway.complete({
-      messages,
-      tenantId,
-      sessionId,
-      mode: 'chat'
-    });
+    // 4. Handle Fallback vs Normal Completion
+    if (retrievalResult.fallbackTriggered) {
+      // Load topic links for tenant/agent
+      const dbTopicLinks = await prisma.agentTopicLink.findMany({
+        where: { tenantId, isActive: true },
+        orderBy: { displayOrder: 'asc' },
+        take: 5
+      });
+
+      if (dbTopicLinks.length > 0) {
+        topicLinks = dbTopicLinks.map((t: any) => ({ title: t.title, url: t.url }));
+      } else {
+        // Fallback to CrawledPage entries
+        const crawledPages = await prisma.crawledPage.findMany({
+          where: { tenantId, enabled: true },
+          take: 5
+        });
+        topicLinks = crawledPages.map((p: any) => ({
+          title: p.title || p.url.replace(/^https?:\/\//, ''),
+          url: p.url
+        }));
+      }
+
+      const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
+      const defaultUrdu = 'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔ آپ درج ذیل لنکس وزٹ کر سکتے ہیں:';
+      const defaultEnglish = 'I can only answer questions related to our services and official knowledge base. Here are some key pages you can explore:';
+      
+      const fallbackIntro = isUrdu
+        ? (agent.RetrievalConfig?.fallbackMessageUrdu || defaultUrdu)
+        : (agent.RetrievalConfig?.fallbackMessage || defaultEnglish);
+
+      reply = fallbackIntro;
+    } else {
+      // 5. Construct Unified System Prompt & Messages
+      const messages = PromptService.buildMessages({
+        tenantConfig,
+        retrievedContext: retrievalResult.contextText,
+        summary,
+        recentMessages,
+        currentMessage: message,
+        language
+      });
+
+      // Execute AI Completion via AiGateway
+      const completion = await AiGateway.complete({
+        messages,
+        tenantId,
+        sessionId,
+        mode: 'chat'
+      });
+
+      reply = completion.reply;
+    }
 
     // 6. Save AI Reply to DB
     if (dbSession && leadId) {
@@ -85,13 +128,15 @@ export class ChatService {
         visitorId: dbSession.visitorId,
         leadId,
         sender: 'ai',
-        message: completion.reply
+        message: reply
       });
     }
 
     return {
-      reply: completion.reply,
-      sources: retrievalResult.sources
+      reply,
+      sources: retrievalResult.sources,
+      fallbackTriggered: retrievalResult.fallbackTriggered,
+      topicLinks
     };
   }
 }

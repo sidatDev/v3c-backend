@@ -67,12 +67,22 @@ model Agent {
   launcherStyle          String           @default("orb")
   leadFormFields         Json?
   widgetTheme            String           @default("light")
+  supportedLanguages     String[]         @default(["English"])
+  autoLanguageDetection Boolean          @default(true)
+  speechSpeed            Float            @default(1.0)
+  voiceStability         Float            @default(0.5)
+  voiceWarmth            Float            @default(0.5)
+  responseLength         String           @default("medium")
+  speakingStyle          String           @default("conversational")
+  promptSections         Json?
   Domain                 Domain?          @relation(fields: [domainId], references: [id])
   Tenant                 Tenant           @relation(fields: [tenantId], references: [id])
   Conversation           Conversation[]
   Lead                   Lead[]
   VisitorSession         VisitorSession[]
   VoipCall               VoipCall[]
+  RetrievalConfig        RetrievalConfig?
+  AgentTopicLink         AgentTopicLink[]
 
   @@index([domainId])
   @@index([phoneNumber])
@@ -183,6 +193,7 @@ model CrawledPage {
   Domain        Domain?                @relation(fields: [domainId], references: [id])
   Tenant        Tenant?                @relation(fields: [tenantId], references: [id])
   DocumentChunk DocumentChunk[]
+  AgentTopicLink AgentTopicLink[]
 
   @@index([createdAt])
   @@index([domainId])
@@ -644,6 +655,9 @@ model Tenant {
   Notification           Notification[]
   Role                   Role[]
   UserRole               UserRole[]
+  RetrievalConfig        RetrievalConfig[]
+  AgentTopicLink         AgentTopicLink[]
+  AiLog                  AiLog[]
 }
 
 model TenantLimit {
@@ -763,6 +777,24 @@ model VisitorSession {
   utmCampaign            String?
   utmTerm                String?
   utmContent             String?
+  channel                String?                  @default("chat")
+  browser                String?
+  device                 String?
+  country                String?
+  conversationSummary    String?
+  conversationStatus     String?                  @default("open")
+  tags                   String[]                 @default([])
+  assignedUserId         Int?
+  humanNotes             String?
+  fallbackTriggered      Boolean                  @default(false)
+  escalated              Boolean                  @default(false)
+  voiceModel             String?
+  aiModel                String?
+  totalInputTokens       Int                      @default(0)
+  totalOutputTokens      Int                      @default(0)
+  estimatedCost          Float                    @default(0)
+  avgResponseLatency     Int                      @default(0)
+  interruptionCount      Int                      @default(0)
   startedAt              DateTime                 @default(now())
   endedAt                DateTime?
   duration               Int?
@@ -782,6 +814,7 @@ model VisitorSession {
   Tenant                 Tenant?                  @relation(fields: [tenantId], references: [id])
   Visitor                Visitor                  @relation(fields: [visitorId], references: [id])
   VoipCall               VoipCall[]
+  AiLog                  AiLog[]
 
   @@index([aiAgentId])
   @@index([domainId])
@@ -941,4 +974,77 @@ model UserRole {
   @@index([roleId])
   @@index([tenantId])
 }
+
+model RetrievalConfig {
+  id                  String   @id @default(uuid())
+  agentId             String   @unique
+  tenantId            String
+  similarityThreshold Float    @default(0.3)
+  topK                Int      @default(5)
+  maxContextTokens    Int      @default(1000)
+  chunkSize           Int      @default(800)
+  chunkOverlap        Int      @default(100)
+  fallbackMode        String   @default("topic_suggestion")
+  fallbackMessage     String   @default("I can only answer questions about our services. Here are some topics I can help with:")
+  fallbackMessageUrdu String   @default("میں صرف ہماری خدمات کے بارے میں سوالات کا جواب دے سکتا ہوں۔ میں ان موضوعات میں مدد کر سکتا ہوں:")
+  maxTopicLinks       Int      @default(5)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  Agent               Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  Tenant              Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+}
+
+model AgentTopicLink {
+  id            String       @id @default(uuid())
+  agentId       String
+  tenantId      String
+  crawledPageId Int?
+  title         String
+  url           String
+  displayOrder  Int          @default(0)
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  Agent         Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  Tenant        Tenant       @relation(fields: [tenantId], references: [id])
+  CrawledPage   CrawledPage? @relation(fields: [crawledPageId], references: [id])
+
+  @@index([agentId])
+  @@index([tenantId])
+}
+
+model AiLog {
+  id                  String          @id @default(uuid())
+  tenantId            String
+  agentId             String?
+  visitorSessionId    Int?
+  requestId           String
+  mode                String          @default("chat")
+  languageDetected    String?
+  userQuery           String?
+  retrievedChunkCount Int             @default(0)
+  avgSimilarityScore  Float?
+  sourcesUsed         String[]        @default([])
+  modelUsed           String?
+  voiceUsed           String?
+  promptTokens        Int             @default(0)
+  completionTokens    Int             @default(0)
+  latencyMs           Int             @default(0)
+  estimatedCost       Float           @default(0)
+  fallbackTriggered   Boolean         @default(false)
+  fallbackMode        String?
+  topicLinksShown     String[]        @default([])
+  confidenceScore     Float?
+  errorMessage        String?
+  createdAt           DateTime        @default(now())
+  Tenant              Tenant          @relation(fields: [tenantId], references: [id])
+  VisitorSession      VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+
+  @@index([tenantId])
+  @@index([visitorSessionId])
+  @@index([createdAt])
+}
+
+
 

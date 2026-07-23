@@ -7,6 +7,7 @@ export interface PromptBuildParams {
   recentMessages?: { sender: 'visitor' | 'ai' | 'user' | 'assistant'; message: string }[];
   currentMessage?: string;
   language?: string;
+  isVoice?: boolean;
 }
 
 export class PromptService {
@@ -14,7 +15,7 @@ export class PromptService {
    * Constructs the unified system prompt & messages array for AI completion/orchestration
    */
   static buildSystemPrompt(params: PromptBuildParams): string {
-    const { tenantConfig, retrievedContext, summary, language = 'en' } = params;
+    const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false } = params;
     const { agent, personaPrompt, guardrailsPrompt } = tenantConfig;
 
     const basePrompt = agent.systemPrompt || 'You are a helpful AI Virtual Customer Assistant.';
@@ -53,7 +54,15 @@ export class PromptService {
       promptParts.push(`### Conversation History Summary:\n${capTokens(summary, 300)}`);
     }
 
-    // 6. Ground Truth Retrieved Context (RAG, <1000 tokens)
+    // 6. Voice Scope Constraint
+    if (isVoice) {
+      promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
+1. You have ZERO general knowledge outside this specific tenant organization.
+2. For EVERY user question, you MUST run the 'searchKnowledge' tool first. Never reply without calling the tool.
+3. If the tool output indicates the query is out of scope or says '[CRITICAL OUT-OF-SCOPE REFUSAL]', you MUST respond exactly with the provided fallback message verbatim. Do NOT generate any other response.`);
+    }
+
+    // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
     if (retrievedContext && retrievedContext.trim()) {
       promptParts.push(`### CRITICAL RULE — Ground Truth Knowledge Base Context (MUST FOLLOW):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
