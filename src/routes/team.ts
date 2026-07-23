@@ -27,6 +27,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
         image: true,
         lastLogin: true,
         createdAt: true,
+        domainId: true,
         UserRole: {
           include: {
             Role: true
@@ -46,7 +47,8 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
       lastLogin: u.lastLogin,
       createdAt: u.createdAt,
       roleName: u.UserRole[0]?.Role.name || u.role,
-      roleId: u.UserRole[0]?.roleId || null
+      roleId: u.UserRole[0]?.roleId || null,
+      domainId: u.domainId || null
     }));
 
     return { status: 'success', data: formatted };
@@ -57,7 +59,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
   fastify.post('/', { preHandler: [protect, restrictTo('team', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
     const isSuperAdmin = request.user!.role === 'super_admin';
-    const { name, email, password, roleId, phone } = request.body as any;
+    const { name, email, password, roleId, phone, domainId } = request.body as any;
 
     if (!name || !email) {
       throw new AppError('Name and email are required.', 400);
@@ -89,6 +91,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
           role: roleName,
           status: 'active',
           tenantId: tenantId || null,
+          domainId: domainId ? parseInt(domainId, 10) : null,
           updatedAt: new Date()
         }
       });
@@ -100,6 +103,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
           role: roleName,
           status: 'active',
           tenantId: tenantId || null,
+          domainId: domainId ? parseInt(domainId, 10) : null,
           updatedAt: new Date()
         }
       });
@@ -144,7 +148,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
     const tenantId = request.user!.tenantId;
     const isSuperAdmin = request.user!.role === 'super_admin';
     const userId = parseInt((request.params as any).id);
-    const { name, phone, roleId, status } = request.body as any;
+    const { name, phone, roleId, status, domainId } = request.body as any;
 
     if (isNaN(userId)) throw new AppError('Invalid User ID', 400);
 
@@ -177,6 +181,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
         phone: phone !== undefined ? phone : user.phone,
         role: roleName,
         status: status || user.status,
+        domainId: domainId !== undefined ? (domainId ? parseInt(domainId, 10) : null) : user.domainId,
         updatedAt: new Date()
       }
     });

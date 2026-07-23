@@ -270,6 +270,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           email: user.email,
           role: primaryRole,
           tenantId: user.tenantId,
+          domainId: user.domainId,
           companyName: user.Tenant?.name || null
         },
         permissions
@@ -300,6 +301,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           email: user.email,
           role: userPayload.role,
           tenantId: user.tenantId,
+          domainId: user.domainId,
           companyName: user.Tenant?.name || null,
           image: user.image
         },

@@ -19,6 +19,7 @@ import teamRoutes from './routes/team';
 import domainRoutes from './routes/domain';
 import accountRoutes from './routes/account';
 import notificationsRoutes from './routes/notifications';
+import aiSearchRoutes from './routes/ai-search';
 import publicRoutes from './routes/public';
 import { errorHandler } from './middleware/error';
 import { auditLoggerHook } from './middleware/audit';
@@ -55,6 +56,7 @@ app.register(teamRoutes, { prefix: '/api/team' });
 app.register(domainRoutes, { prefix: '/api/domain' });
 app.register(accountRoutes, { prefix: '/api/account' });
 app.register(notificationsRoutes, { prefix: '/api/notifications' });
+app.register(aiSearchRoutes, { prefix: '/api/ai-search' });
 app.register(publicRoutes, { prefix: '/api/public' });
 
 // Health Check
