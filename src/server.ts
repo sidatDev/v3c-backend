@@ -33,4 +33,4 @@ process.on('uncaughtException', (err: any) => {
   }
   process.exit(1);
 });
-// Watcher trigger comment: removed unsupported prompt parameter from transcription config.
+// Watcher trigger comment: isolated EFU tenant workspace and vector chunks setup complete.

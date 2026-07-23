@@ -12,6 +12,7 @@ import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
 // configured fallback immediately.
 const COMPETITOR_PATTERNS: RegExp[] = [
   /\befu\b/i,
+  /\bigi\b/i,
   /\bjubilee\b/i,
   /\badamjee\b/i,
   /\btpl\b/i,
@@ -21,17 +22,24 @@ const COMPETITOR_PATTERNS: RegExp[] = [
   /\bsalamtakaful\b/i,
   /\bpak\s*qatar\b/i,
   /\bwarid\b/i,
-  /\bjubilee\b/i,
   /\bhabib\s*metro\b/i,
   /\balianz\b/i,
   /\bchubb\b/i,
   /\bpru\s*bsn\b/i,
 ];
 
-function detectCompetitor(query: string): string | null {
+function detectCompetitor(query: string, currentTenantName?: string): string | null {
+  const tenantLower = (currentTenantName || '').toLowerCase();
   for (const pattern of COMPETITOR_PATTERNS) {
     const match = query.match(pattern);
-    if (match) return match[0];
+    if (match) {
+      const matchLower = match[0].toLowerCase();
+      // Skip if the matched competitor name is part of the current tenant's own name
+      if (tenantLower && tenantLower.includes(matchLower)) {
+        continue;
+      }
+      return match[0];
+    }
   }
   return null;
 }
@@ -94,8 +102,8 @@ export class RealtimeSessionManager {
 
     const { tenantId, agent } = this.tenantConfig;
 
-    // Normalise voice to a valid voice name
-    const validVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer', 'ash', 'ballad', 'coral', 'verse', 'marin', 'cedar', 'sage'];
+    // Normalise voice to a valid OpenAI Realtime WebSocket voice name
+    const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
     const rawVoice = (agent.voice || 'shimmer').toLowerCase();
     this.selectedVoice = validVoices.includes(rawVoice) ? rawVoice : 'shimmer';
 
@@ -352,7 +360,7 @@ export class RealtimeSessionManager {
 
         // ── Tenant/entity guard — before any embedding ─────────────────────
         // If the query names a competitor explicitly, skip pgvector entirely.
-        const competitorMatch = detectCompetitor(userSpeech);
+        const competitorMatch = detectCompetitor(userSpeech, this.tenantConfig.agent.name);
         if (competitorMatch) {
           console.log(`[PIPELINE ${ts()}] 🚫 COMPETITOR DETECTED: "${competitorMatch}" — skipping retrieval, returning fallback immediately`);
 
