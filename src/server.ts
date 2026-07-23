@@ -33,4 +33,4 @@ process.on('uncaughtException', (err: any) => {
   }
   process.exit(1);
 });
-// Watcher trigger comment: 5 implementation fixes applied.
+// Watcher trigger comment: removed unsupported prompt parameter from transcription config.

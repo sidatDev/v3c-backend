@@ -144,11 +144,14 @@ export class RealtimeSessionManager {
         type: 'session.update',
         session: {
           type: 'realtime',
-          instructions: `${baseInstructions}\nLanguage Instruction: You MUST respond ONLY in ${this.language}. Do not switch languages.`,
+          instructions: `${baseInstructions}\nSupported Languages: STRICTLY English and Urdu ONLY. Never detect, respond in, or recognize Hindi or any other language or script.`,
           audio: {
             input: {
               format: { type: 'audio/pcm', rate: 24000 },
-              transcription: { model: 'gpt-realtime-whisper' },
+              transcription: {
+                model: 'gpt-realtime-whisper',
+                language: 'ur',
+              },
               turn_detection: {
                 type: 'server_vad',
                 threshold: 0.5,
@@ -326,7 +329,12 @@ export class RealtimeSessionManager {
 
         console.log(`[PIPELINE ${ts()}] ↓ transcription.completed — "${userSpeech.substring(0, 80)}"`);
 
-        const isUrdu = this.language === 'Urdu' || /[\u0600-\u06FF]/.test(userSpeech);
+        // Strictly English and Urdu ONLY.
+        const isUrduScript = /[\u0600-\u06FF]/.test(userSpeech);
+        const isRomanUrduKeywords = /\b(kya|kaise|kis|hai|hain|kiya|apki|aapki|madad|batao|bataen|bataeyn|chahiye|mein|hoon|hun|sab|sahib|bhai|sirf|aur|yeh|woh|raha|rahi|taraf|zaroorat|takaful|bima|beema|jis|jo|terah|tarah|ko|ke|ki|se)\b/i.test(userSpeech);
+
+        // Binary classification: strictly Urdu or English
+        const isUrdu = this.language === 'Urdu' || isUrduScript || isRomanUrduKeywords;
         const detectedLanguage: 'Urdu' | 'English' = isUrdu ? 'Urdu' : 'English';
 
         // Save visitor turn to DB
