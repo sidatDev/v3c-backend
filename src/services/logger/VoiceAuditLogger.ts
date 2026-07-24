@@ -1,15 +1,25 @@
 export interface VoiceAuditRecord {
   conversationId: string;
   userTranscript: string;
-  detectedLanguage: 'Urdu' | 'English';
+  detectedLanguage: 'Urdu' | 'English' | 'RomanUrdu';
+  dominantLanguage?: 'English' | 'Urdu' | 'RomanUrdu';
+  previousSessionLanguage?: string;
+  finalResponseLanguage?: string;
+  greetingReplayDetected?: boolean;
+  ignoredTranscript?: boolean;
+  transcriptLength?: number;
+  wordCount?: number;
+  thinkingDelayMs?: number;
+  vadTriggerReason?: string;
+  retrievalLatencyMs?: number;
   embeddingGenerated: boolean;
   topMatches: { chunkId: string; similarity: number }[];
   similarityThreshold: number;
   highestSimilarity: number;
-  decision: 'RAG' | 'OUT_OF_SCOPE';
+  decision: 'RAG' | 'OUT_OF_SCOPE' | 'IGNORED_NOISE';
   fallbackTriggered: boolean;
   gptInvoked: boolean;
-  responseType: 'RAG' | 'Fallback';
+  responseType: 'RAG' | 'Fallback' | 'Ignored';
   retrievedSources: number;
   voice: string;
   latencyMs: number;
@@ -20,7 +30,7 @@ const PAD = 44;
 const LINE = '─'.repeat(PAD);
 
 function row(label: string, value: string): string {
-  return `  ${label.padEnd(22)}: ${value}`;
+  return `  ${label.padEnd(24)}: ${value}`;
 }
 
 export class VoiceAuditLogger {
@@ -42,9 +52,17 @@ export class VoiceAuditLogger {
       row('Conversation ID', record.conversationId),
       '',
       row('User Transcript', `"${transcript}"`),
-      row('Detected Language', record.detectedLanguage),
+      row('Transcript Length', `${record.transcriptLength ?? record.userTranscript.length} chars`),
+      row('Word Count', `${record.wordCount ?? record.userTranscript.split(/\s+/).length} words`),
+      row('Dominant Language', record.dominantLanguage || record.detectedLanguage),
+      row('Previous Lang Memory', record.previousSessionLanguage || '(none)'),
+      row('Final Response Lang', record.finalResponseLanguage || record.detectedLanguage),
+      row('Ignored Transcript', record.ignoredTranscript ? '⚠️ Yes (Noise/Filler)' : '✅ No'),
+      row('Greeting Replay Guard', record.greetingReplayDetected ? '⚠️ Replay Blocked' : '✅ Clean'),
       '',
       row('Embedding Generated', record.embeddingGenerated ? '✅ Yes' : '❌ No'),
+      row('Retrieval Latency', `${record.retrievalLatencyMs ?? 0} ms`),
+      row('Thinking Delay Added', `${record.thinkingDelayMs ?? 0} ms`),
       '',
       '  Top Matches:',
     ];

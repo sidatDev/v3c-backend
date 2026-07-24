@@ -24,9 +24,14 @@ export class PromptService {
 
     let langInstruction = '';
     if (agent.autoLanguageDetection) {
-      langInstruction = 'CRITICAL LANGUAGE MATCHING RULE: Automatically detect the language spoken by the user. If the user speaks in English, respond strictly in English. If the user speaks in Urdu or Roman Urdu, respond in Urdu.';
+      langInstruction = `CRITICAL DOMINANT LANGUAGE MATCHING RULE:
+1. Detect the DOMINANT language of the user's utterance by overall word count, NOT by a single word or suffix.
+2. If the utterance is primarily English (even if it ends with words like "yaar" or "ji"), respond strictly in English.
+3. If the utterance is primarily Urdu or Roman Urdu, respond in proper Urdu script/Roman Urdu.
+4. NEVER switch language mid-response or flip languages for single-word borrowings.
+5. STRICTLY NO HINDI (Devanagari script/vocabulary). You exclusively serve Pakistani customers in Urdu and English.`;
     } else if (language === 'ur' || language === 'Urdu') {
-      langInstruction = 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script.';
+      langInstruction = 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script. STRICTLY NO HINDI (Devanagari).';
     } else {
       langInstruction = 'CRITICAL: You MUST respond ONLY in English.';
     }

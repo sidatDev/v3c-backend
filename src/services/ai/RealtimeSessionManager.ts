@@ -5,11 +5,14 @@ import { RetrievalService } from './RetrievalService';
 import { ConversationService } from './ConversationService';
 import { StructuredLogger } from '../logger/StructuredLogger';
 import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
+import {
+  isNoisyTranscript,
+  normalizeHindiToUrdu,
+  detectDominantLanguage,
+  computeThinkingDelay
+} from './VoicePipelineUtils';
 
 // ── Competitor / out-of-tenant entity guard ──────────────────────────────────
-// These companies are never in scope for any tenant. If a user query explicitly
-// names one of them, we skip embedding + pgvector entirely and return the
-// configured fallback immediately.
 const COMPETITOR_PATTERNS: RegExp[] = [
   /\befu\b/i,
   /\bigi\b/i,
@@ -34,7 +37,6 @@ function detectCompetitor(query: string, currentTenantName?: string): string | n
     const match = query.match(pattern);
     if (match) {
       const matchLower = match[0].toLowerCase();
-      // Skip if the matched competitor name is part of the current tenant's own name
       if (tenantLower && tenantLower.includes(matchLower)) {
         continue;
       }
@@ -62,13 +64,20 @@ export class RealtimeSessionManager {
   private dbSession: any = null;
   private leadId: number | null = null;
 
+  // Session-level language memory & confidence tracking
+  private sessionPreferredLanguage: 'English' | 'Urdu' | 'RomanUrdu' | null = null;
+  private languageConfidenceStreak: number = 0;
+
+  // Turn counter for greeting replay protection & pipeline tracking
+  private turnCount: number = 0;
+
   // Per-turn state
   private aiTranscriptBuffer: string = '';
   private pendingTurnAudit: VoiceAuditRecord | null = null;
   private turnStartTime: number = 0;
   private selectedVoice: string = 'shimmer';
 
-  // Lifecycle guards — each must fire exactly once per session
+  // Lifecycle guards
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
 
@@ -105,6 +114,15 @@ export class RealtimeSessionManager {
 
     const { tenantId, agent } = this.tenantConfig;
 
+    // Configurable voice parameters with fallback to enterprise production defaults
+    const vSettings = (agent.voiceSettings as any) || {};
+    const vadThreshold = typeof vSettings.vadThreshold === 'number' ? vSettings.vadThreshold : 0.65;
+    const vadSilenceDurationMs = typeof vSettings.vadSilenceDurationMs === 'number' ? vSettings.vadSilenceDurationMs : 800;
+    const vadPrefixPaddingMs = typeof vSettings.vadPrefixPaddingMs === 'number' ? vSettings.vadPrefixPaddingMs : 400;
+    const voiceResponseDelayMs = typeof vSettings.voiceResponseDelayMs === 'number' ? vSettings.voiceResponseDelayMs : 600;
+    const minTranscriptLength = typeof vSettings.minTranscriptLength === 'number' ? vSettings.minTranscriptLength : 3;
+    const minWordCount = typeof vSettings.minWordCount === 'number' ? vSettings.minWordCount : 2;
+
     // Normalise voice to a valid OpenAI Realtime WebSocket voice name
     const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
     const rawVoice = (agent.voice || 'shimmer').toLowerCase();
@@ -115,6 +133,8 @@ export class RealtimeSessionManager {
     console.log(`  Agent ID   : ${agent.id}`);
     console.log(`  Voice      : ${this.selectedVoice}`);
     console.log(`  Language   : ${this.language}`);
+    console.log(`  VAD Config : threshold=${vadThreshold}, silence=${vadSilenceDurationMs}ms, prefix=${vadPrefixPaddingMs}ms`);
+    console.log(`  Timing     : targetThinkingDelay=${voiceResponseDelayMs}ms`);
 
     // ── 2. Load DB Session & Lead ─────────────────────────────────────────────
     if (this.sessionIdNum) {
@@ -145,28 +165,23 @@ export class RealtimeSessionManager {
         tenantId, voice: this.selectedVoice, agentName: agent.name,
       });
 
-      /**
-       * CRITICAL SESSION CONFIG
-       * Voice nested inside audio.output — top-level 'voice' is rejected.
-       * Transcription and VAD nested inside audio.input.
-       * create_response: false — backend is the sole caller of response.create().
-       */
       const sessionConfig = {
         type: 'session.update',
         session: {
           type: 'realtime',
-          instructions: `${baseInstructions}\nSupported Languages: STRICTLY English and Urdu ONLY. Never detect, respond in, or recognize Hindi or any other language or script.`,
+          instructions: `${baseInstructions}\nSupported Languages: STRICTLY English and Urdu ONLY. Never detect, respond in, or recognize Hindi or Devanagari script.`,
           audio: {
             input: {
               format: { type: 'audio/pcm', rate: 24000 },
               transcription: {
                 model: 'gpt-realtime-whisper',
+                language: (this.language === 'Urdu' || agent.language === 'Urdu' || (agent.supportedLanguages && agent.supportedLanguages.includes('Urdu'))) ? 'ur' : undefined,
               },
               turn_detection: {
                 type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 500,
+                threshold: vadThreshold,
+                prefix_padding_ms: vadPrefixPaddingMs,
+                silence_duration_ms: vadSilenceDurationMs,
                 create_response: false,
               },
             },
@@ -213,7 +228,6 @@ export class RealtimeSessionManager {
         return;
       }
 
-      // Skip high-frequency audio chunk events in trace logs
       const audioEventTypes = new Set([
         'response.audio.delta',
         'response.output_audio.delta',
@@ -224,7 +238,7 @@ export class RealtimeSessionManager {
         console.log(`[TRACE ${ts()}] ${event.type}${event.error?.message ? ' — ERROR: ' + event.error.message : ''}`);
       }
 
-      // ── session.updated: log effective config ─────────────────────────────
+      // ── session.updated: log effective config & send verbatim greeting ──────
       if (event.type === 'session.updated') {
         const s = event.session;
         const cr = s.audio?.input?.turn_detection?.create_response;
@@ -233,32 +247,24 @@ export class RealtimeSessionManager {
         console.log(`  Model              : ${s.model}`);
         console.log(`  Voice              : ${s.audio?.output?.voice ?? '(not set)'}`);
         console.log(`  Transcription Model: ${txModel ?? '(none — transcription DISABLED)'}`);
-        console.log(`  VAD type           : ${s.audio?.input?.turn_detection?.type ?? '(none)'}`);
-        console.log(`  create_response    : ${cr === false ? 'FALSE ✅ (backend controls responses)' : cr === true ? 'TRUE ⚠ (OpenAI auto-responds)' : '(not set — defaults TRUE) ⚠'}`);
-        console.log(`  Instructions set   : ${s.instructions ? 'YES' : 'NO'}`);
+        console.log(`  VAD threshold      : ${s.audio?.input?.turn_detection?.threshold}`);
+        console.log(`  VAD silenceMs      : ${s.audio?.input?.turn_detection?.silence_duration_ms}`);
+        console.log(`  create_response    : ${cr === false ? 'FALSE ✅ (backend controls responses)' : 'TRUE ⚠'}`);
         console.log(`─────────────────────────────────────────────────────────\n`);
 
-        // ── Send greeting EXACTLY ONCE after session is confirmed ready ──────
-        if (!this.greetingSent) {
+        // Send verbatim greeting EXACTLY ONCE at session initialization
+        if (!this.greetingSent && this.turnCount === 0) {
           this.greetingSent = true;
-          const greetingText = agent.initialGreetingMessage || 'Hello! How can I help you today?';
-          const greetingPrompt =
-            this.language === 'Urdu'
-              ? `براہ کرم سلام کہیں اور کہیں: "${greetingText}"`
-              : `Please greet the visitor warmly using this exact message: "${greetingText}"`;
-
-          console.log(`[SESSION LIFECYCLE] GREETING SEND (once only) — "${greetingText}"`);
+          const greetingText = agent.initialGreetingMessage || 'Assalam-u-Alaikum! How can I help you today?';
+          console.log(`[SESSION LIFECYCLE] GREETING SEND (verbatim, once only) — "${greetingText}"`);
 
           if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
             this.openAiWs.send(JSON.stringify({
-              type: 'conversation.item.create',
-              item: {
-                type: 'message',
-                role: 'user',
-                content: [{ type: 'input_text', text: greetingPrompt }],
+              type: 'response.create',
+              response: {
+                instructions: `You MUST speak EXACTLY the following text, word for word, with no additions, modifications, or reinterpretation: "${greetingText}"`,
               },
             }));
-            this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
           }
 
           if (!this.sessionReadySent && this.socket.readyState === WebSocket.OPEN) {
@@ -267,14 +273,15 @@ export class RealtimeSessionManager {
             console.log(`[SESSION LIFECYCLE] session.ready sent to browser client`);
           }
         } else {
-          console.log(`[SESSION LIFECYCLE] session.updated received again — greeting NOT re-sent (guard active)`);
+          console.log(`[SESSION LIFECYCLE] session.updated received — greeting NOT re-sent (turnCount: ${this.turnCount}, greetingSent: ${this.greetingSent})`);
         }
       }
 
-      // ── Turn pipeline trace ───────────────────────────────────────────────
+      // ── Turn pipeline trace & barge-in tracking ───────────────────────────
       if (event.type === 'input_audio_buffer.speech_started') {
+        this.turnCount++;
         console.log(`\n╔══════════════════════════════════════════════════════╗`);
-        console.log(`║  VOICE TURN START  @ ${ts()}  ║`);
+        console.log(`║  VOICE TURN START #${this.turnCount}  @ ${ts()}  ║`);
         console.log(`╚══════════════════════════════════════════════════════╝`);
       }
 
@@ -288,7 +295,7 @@ export class RealtimeSessionManager {
 
       if (event.type === 'response.created') {
         const isGreeting = !this.pendingTurnAudit && this.greetingSent && this.aiTranscriptBuffer === '';
-        console.log(`[PIPELINE ${ts()}] ⚡ response.created${isGreeting ? ' [GREETING — expected]' : ' [USER TURN — if before transcription.completed this is a bug]'}`);
+        console.log(`[PIPELINE ${ts()}] ⚡ response.created${isGreeting ? ' [GREETING — expected]' : ' [USER TURN]'}`);
       }
 
       if (event.type === 'response.done') {
@@ -331,21 +338,70 @@ export class RealtimeSessionManager {
         event.type === 'conversation.item.input_audio_transcription.completed' &&
         event.transcript
       ) {
-        const userSpeech = event.transcript.trim();
-        if (!userSpeech || !this.tenantConfig) return;
+        const rawSpeech = event.transcript.trim();
+        if (!rawSpeech || !this.tenantConfig) return;
+
+        // 1. Normalize Devanagari (Hindi) Unicode if present
+        const userSpeech = normalizeHindiToUrdu(rawSpeech);
+
+        // 2. Transcript Validation Gate (#3, #8)
+        if (isNoisyTranscript(userSpeech, minTranscriptLength, minWordCount)) {
+          console.log(`[PIPELINE ${ts()}] ⏭ IGNORED noisy/short transcript: "${userSpeech}" — remaining in listening mode`);
+          const ignoredAudit: VoiceAuditRecord = {
+            conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
+            userTranscript: userSpeech,
+            detectedLanguage: this.sessionPreferredLanguage || 'English',
+            dominantLanguage: this.sessionPreferredLanguage || 'English',
+            previousSessionLanguage: this.sessionPreferredLanguage || undefined,
+            finalResponseLanguage: this.sessionPreferredLanguage || undefined,
+            greetingReplayDetected: false,
+            ignoredTranscript: true,
+            transcriptLength: userSpeech.length,
+            wordCount: userSpeech.split(/\s+/).length,
+            thinkingDelayMs: 0,
+            retrievalLatencyMs: 0,
+            embeddingGenerated: false,
+            topMatches: [],
+            similarityThreshold: 0,
+            highestSimilarity: 0,
+            decision: 'IGNORED_NOISE',
+            fallbackTriggered: false,
+            gptInvoked: false,
+            responseType: 'Ignored',
+            retrievedSources: 0,
+            voice: this.selectedVoice,
+            latencyMs: 0,
+          };
+          VoiceAuditLogger.print(ignoredAudit);
+          VoiceAuditLogger.printFinal(ignoredAudit);
+          return;
+        }
 
         this.turnStartTime = Date.now();
         const tTranscriptDone = Date.now();
 
         console.log(`[PIPELINE ${ts()}] ↓ transcription.completed — "${userSpeech.substring(0, 80)}"`);
 
-        // Strictly English and Urdu ONLY.
-        const isUrduScript = /[\u0600-\u06FF]/.test(userSpeech);
-        const isRomanUrduKeywords = /\b(kya|kaise|kis|hai|hain|kiya|apki|aapki|madad|batao|bataen|bataeyn|chahiye|mein|hoon|hun|sab|sahib|bhai|sirf|aur|yeh|woh|raha|rahi|taraf|zaroorat|takaful|bima|beema|jis|jo|terah|tarah|ko|ke|ki|se)\b/i.test(userSpeech);
+        // 3. Dominant Language Classification & Session Language Memory (#4, #9)
+        const prevLang = this.sessionPreferredLanguage;
+        const dominantLang = detectDominantLanguage(userSpeech);
 
-        // Binary classification: strictly Urdu or English
-        const isUrdu = this.language === 'Urdu' || isUrduScript || isRomanUrduKeywords;
-        const detectedLanguage: 'Urdu' | 'English' = isUrdu ? 'Urdu' : 'English';
+        if (this.sessionPreferredLanguage === dominantLang) {
+          this.languageConfidenceStreak++;
+        } else if (!this.sessionPreferredLanguage) {
+          this.sessionPreferredLanguage = dominantLang;
+          this.languageConfidenceStreak = 1;
+        } else {
+          // Switch session preferred language if confidence streak builds or utterance is substantial
+          if (this.languageConfidenceStreak >= 2 || userSpeech.split(/\s+/).length >= 4) {
+            console.log(`[PIPELINE ${ts()}] 🌐 Session language switched: ${this.sessionPreferredLanguage} ➔ ${dominantLang}`);
+            this.sessionPreferredLanguage = dominantLang;
+            this.languageConfidenceStreak = 1;
+          }
+        }
+
+        const detectedLanguage: 'English' | 'Urdu' | 'RomanUrdu' = this.sessionPreferredLanguage || dominantLang;
+        const isUrdu = detectedLanguage === 'Urdu' || detectedLanguage === 'RomanUrdu';
 
         // Save visitor turn to DB
         if (this.sessionIdNum && this.leadId) {
@@ -361,7 +417,6 @@ export class RealtimeSessionManager {
         }
 
         // ── Tenant/entity guard — before any embedding ─────────────────────
-        // If the query names a competitor explicitly, skip pgvector entirely.
         const competitorMatch = detectCompetitor(userSpeech, this.tenantConfig.agent.name);
         if (competitorMatch) {
           console.log(`[PIPELINE ${ts()}] 🚫 COMPETITOR DETECTED: "${competitorMatch}" — skipping retrieval, returning fallback immediately`);
@@ -376,6 +431,15 @@ export class RealtimeSessionManager {
             conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
             userTranscript: userSpeech,
             detectedLanguage,
+            dominantLanguage: dominantLang,
+            previousSessionLanguage: prevLang || undefined,
+            finalResponseLanguage: detectedLanguage,
+            greetingReplayDetected: false,
+            ignoredTranscript: false,
+            transcriptLength: userSpeech.length,
+            wordCount: userSpeech.split(/\s+/).length,
+            thinkingDelayMs: 0,
+            retrievalLatencyMs: 0,
             embeddingGenerated: false,
             topMatches: [],
             similarityThreshold: 0,
@@ -391,15 +455,21 @@ export class RealtimeSessionManager {
           VoiceAuditLogger.print(competitorAudit);
           VoiceAuditLogger.printFinal(competitorAudit);
 
-          if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            console.log(`[PIPELINE ${ts()}] → SENDING response.create() [COMPETITOR GUARD fallback]`);
-            this.openAiWs.send(JSON.stringify({
-              type: 'response.create',
-              response: {
-                instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
-              },
-            }));
+          if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
+
+          // Natural thinking delay before fallback response
+          const delayMs = computeThinkingDelay(Date.now() - tTranscriptDone, voiceResponseDelayMs);
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
           }
+
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [COMPETITOR GUARD fallback]`);
+          this.openAiWs.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
+            },
+          }));
           return;
         }
 
@@ -414,16 +484,27 @@ export class RealtimeSessionManager {
           threshold,
         );
 
-        const tAfterRetrieval = Date.now();
+        const retrievalMs = retrieval.timings.totalMs;
         console.log(`[PIPELINE ${ts()}] ↓ Retrieval DONE — topSimilarity: ${retrieval.topSimilarity.toFixed(3)}, chunks: ${retrieval.chunks.length}, fallback: ${retrieval.fallbackTriggered}`);
-        console.log(`[PIPELINE ${ts()}]   Timings: embedding=${retrieval.timings.embeddingMs}ms, pgvector=${retrieval.timings.vectorSearchMs}ms, total=${retrieval.timings.totalMs}ms${retrieval.timings.totalMs > 400 ? ' ⚠ OVER BUDGET' : ' ✅'}`);
-        console.log(`[PIPELINE ${ts()}] ↓ Decision: ${retrieval.fallbackTriggered ? 'OUT_OF_SCOPE' : 'RAG'}`);
+        console.log(`[PIPELINE ${ts()}]   Timings: embedding=${retrieval.timings.embeddingMs}ms, pgvector=${retrieval.timings.vectorSearchMs}ms, total=${retrievalMs}ms`);
+
+        // Compute natural thinking delay (#1)
+        const thinkingDelayMs = computeThinkingDelay(retrievalMs, voiceResponseDelayMs);
 
         // Build audit record
         const turnAudit: VoiceAuditRecord = {
           conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
           userTranscript: userSpeech,
           detectedLanguage,
+          dominantLanguage: dominantLang,
+          previousSessionLanguage: prevLang || undefined,
+          finalResponseLanguage: detectedLanguage,
+          greetingReplayDetected: false,
+          ignoredTranscript: false,
+          transcriptLength: userSpeech.length,
+          wordCount: userSpeech.split(/\s+/).length,
+          thinkingDelayMs,
+          retrievalLatencyMs: retrievalMs,
           embeddingGenerated: true,
           topMatches: retrieval.chunks.slice(0, 3).map((c) => ({
             chunkId: String(c.id ?? '?'),
@@ -444,6 +525,12 @@ export class RealtimeSessionManager {
 
         if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
 
+        // Apply natural thinking delay if retrieval was fast (#1)
+        if (thinkingDelayMs > 0) {
+          console.log(`[PIPELINE ${ts()}] ⏱ Natural thinking delay: ${thinkingDelayMs}ms before response.create()`);
+          await new Promise((r) => setTimeout(r, thinkingDelayMs));
+        }
+
         if (retrieval.fallbackTriggered) {
           // ── Branch A: OUT_OF_SCOPE ─────────────────────────────────────────
           const fallbackText = isUrdu
@@ -460,14 +547,10 @@ export class RealtimeSessionManager {
             },
           }));
         } else {
-          // ── Branch B: RAG — inject only the retrieved context for this turn ─
-          // IMPORTANT: We do NOT re-inject the session system prompt here.
-          // Only the retrieved context chunk is added as a turn-scoped item.
-          const tPrompt0 = Date.now();
-          const contextOnly = retrieval.contextText; // raw retrieved chunks only
-          const promptAssemblyMs = Date.now() - tPrompt0;
+          // ── Branch B: RAG — inject retrieved context for turn ─────────────
+          const contextOnly = retrieval.contextText;
 
-          console.log(`[PIPELINE ${ts()}] → SENDING conversation.item.create [${retrieval.chunks.length} chunks, promptAssembly=${promptAssemblyMs}ms]`);
+          console.log(`[PIPELINE ${ts()}] → SENDING conversation.item.create [${retrieval.chunks.length} chunks]`);
 
           this.openAiWs.send(JSON.stringify({
             type: 'conversation.item.create',
@@ -482,7 +565,7 @@ export class RealtimeSessionManager {
           }));
 
           const totalPipelineMs = Date.now() - tTranscriptDone;
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [RAG] — total pipeline from transcript: ${totalPipelineMs}ms${totalPipelineMs > 400 ? ' ⚠' : ' ✅'}`);
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [RAG] — total pipeline from transcript: ${totalPipelineMs}ms`);
 
           this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
         }

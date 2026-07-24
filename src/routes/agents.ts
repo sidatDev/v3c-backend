@@ -151,7 +151,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         voiceWarmth: body.voiceWarmth !== undefined ? Number(body.voiceWarmth) : existing.voiceWarmth,
         autoLanguageDetection: body.autoLanguageDetection !== undefined ? Boolean(body.autoLanguageDetection) : existing.autoLanguageDetection,
         supportedLanguages: body.supportedLanguages !== undefined ? body.supportedLanguages : existing.supportedLanguages,
-        promptSections: body.promptSections !== undefined ? body.promptSections : existing.promptSections,
+        voiceSettings: body.voiceSettings !== undefined ? body.voiceSettings : existing.voiceSettings,
         isActive: body.isActive !== undefined ? Boolean(body.isActive) : existing.isActive,
         updatedAt: new Date()
       }
