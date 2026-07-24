@@ -40,7 +40,7 @@ function detectCompetitor(query: string, currentTenantName?: string): string | n
     const match = query.match(pattern);
     if (match) {
       const matchLower = match[0].toLowerCase();
-      if (tenantLower && tenantLower.includes(matchLower)) {
+      if (tenantLower && (tenantLower.includes(matchLower) || (matchLower === 'efu' && tenantLower.includes('efu')))) {
         continue;
       }
       return match[0];
@@ -181,7 +181,7 @@ export class RealtimeSessionManager {
               format: { type: 'audio/pcm', rate: 24000 },
               transcription: {
                 model: 'gpt-realtime-whisper',
-                language: (this.language === 'Urdu' && !agent.autoLanguageDetection) ? 'ur' : undefined,
+                language: (this.language === 'Urdu' || agent.autoLanguageDetection || (agent.language && agent.language.toLowerCase().includes('ur'))) ? 'ur' : undefined,
               },
               turn_detection: {
                 type: 'server_vad',
@@ -465,7 +465,12 @@ export class RealtimeSessionManager {
 
           this.lastUserTurn = userSpeech;
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SYSTEM PROMPT PERSONA PATH]`);
-          this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
+          this.openAiWs.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              instructions: `[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional enterprise support agent. If asked about our services or company overview, introduce our primary services clearly.`,
+            },
+          }));
           return;
         }
 
@@ -527,7 +532,9 @@ export class RealtimeSessionManager {
         }
 
         // ── Intent Path B: Grounded Vector Search (RAG) ─────────────────────
-        const threshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.3;
+        const rawThreshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.35;
+        // Cap threshold to max 0.38 for voice inputs to prevent STT mishearings (e.g. "ASU" for "EFU") from being hard-blocked
+        const threshold = Math.min(rawThreshold, 0.38);
         const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
         console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — query: "${searchQuery.substring(0, 80)}", threshold: ${threshold}`);
 
@@ -567,7 +574,7 @@ export class RealtimeSessionManager {
           highestSimilarity: retrieval.topSimilarity,
           decision: retrieval.fallbackTriggered ? 'OUT_OF_SCOPE' : 'RAG',
           fallbackTriggered: retrieval.fallbackTriggered,
-          gptInvoked: !retrieval.fallbackTriggered,
+          gptInvoked: true,
           responseType: retrieval.fallbackTriggered ? 'Fallback' : 'RAG',
           retrievedSources: retrieval.chunks.length,
           voice: this.selectedVoice,
@@ -584,42 +591,33 @@ export class RealtimeSessionManager {
         }
 
         if (retrieval.fallbackTriggered) {
-          // ── Strict Out-of-Scope Fallback ──────────────────────────────────
+          // ── Soft Fallback — allow GPT to answer domain queries politely ──────
           const fallbackText = isUrdu
             ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu ||
               'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔'
             : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage ||
               'I can only answer questions related to our services and official knowledge base.';
 
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE FALLBACK]`);
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SOFT FALLBACK WITH DOMAIN CONTEXT]`);
           this.openAiWs.send(JSON.stringify({
             type: 'response.create',
             response: {
-              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
+              instructions: `[VOICE TURN INSTRUCTIONS]\nUser query: "${userSpeech}"\nIf this query asks about our services, company overview, or insurance products (handling minor speech-to-text mishearings like "ASU" for "EFU"), act as a professional enterprise support agent and answer warmly with complete, clear information about what we offer.\nIf the query is strictly out of scope or asks about competitors, respond politely with: "${fallbackText}"`,
             },
           }));
         } else {
-          // ── RAG — inject retrieved context for turn ──────────────────────
+          // ── RAG — inject retrieved context TURN-SCOPED inside response.create (Token Optimized) ──────
           const contextOnly = retrieval.contextText;
+          const totalPipelineMs = Date.now() - tTranscriptDone;
 
-          console.log(`[PIPELINE ${ts()}] → SENDING conversation.item.create [${retrieval.chunks.length} chunks]`);
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [TOKEN OPTIMIZED TURN-SCOPED RAG] (${retrieval.chunks.length} chunks) — pipeline: ${totalPipelineMs}ms`);
 
           this.openAiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'message',
-              role: 'user',
-              content: [{
-                type: 'input_text',
-                text: `[RETRIEVED KNOWLEDGE — THIS TURN ONLY. Answer the user's question using ONLY this context.]\n${contextOnly}`,
-              }],
+            type: 'response.create',
+            response: {
+              instructions: `[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Act as an enterprise support agent and answer the user's question clearly, completely, and accurately in ${detectedLanguage} using this context. Do not truncate important details]:\n${contextOnly}`,
             },
           }));
-
-          const totalPipelineMs = Date.now() - tTranscriptDone;
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [RAG] — total pipeline from transcript: ${totalPipelineMs}ms`);
-
-          this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
         }
       }
     });

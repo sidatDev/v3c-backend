@@ -373,6 +373,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       });
     }
 
+    TenantConfigCache.invalidate(tenantId || undefined);
     return { status: 'success', message: 'System prompt updated successfully.' };
   });
 

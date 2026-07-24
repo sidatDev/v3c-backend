@@ -27,7 +27,12 @@ const GREETING_PATTERNS: RegExp[] = [
   /\b(how\s*are\s*you|how\s*do\s*you\s*do|kaise\s*h?ai?n?|kya\s*haal|kya\s*hal|kaisay\s*h?ai?n?|kisi\s*ho)\b/i,
   /\b(thank\s*you|thanks|shukriya|meherbani|jazakallah|allah\s*hafiz|bye|goodbye)\b/i,
   /\b(who\s*are\s*you|what\s*is\s*your\s*name|aap\s*kaun\s*hai?n?|ap\s*kaun\s*hai?n?)\b/i,
-  /[\u0600-\u06FF]*(السلام|سلام|وعلیکم|ہیلو|شکریہ|خدا حافظ|اللہ حافظ|کیسے|کیسا)[\u0600-\u06FF]*/
+  /\b(what\s*(services|products|policies|insurance|coverage)\s*(do\s*you\s*(provide|offer|have)|are\s*there|available))\b/i,
+  /\b(tell\s*me\s*about\s*(your\s*)?(services|products|company|insurance))\b/i,
+  /\b(what\s*can\s*you\s*(do|help\s*with))\b/i,
+  /\b(konsi|kon\s*si|kya)\s*(services|bima|insurance|coverage)\s*(hain|h?ai?n?|dete\s*h?ai?n?|milti\s*h?ai?n?)\b/i,
+  /\b(kya\s*kaam\s*karte\s*h?ai?n?|madad\s*kar\s*sakte\s*h?ai?n?)\b/i,
+  /[\u0600-\u06FF]*(السلام|سلام|وعلیکم|ہیلو|شکریہ|خدا حافظ|اللہ حافظ|کیسے|کیسا|سروسز|خدمات)[\u0600-\u06FF]*/
 ];
 
 const AFFIRMATION_PATTERNS: RegExp[] = [
@@ -100,12 +105,24 @@ export function isConversationalAffirmation(text: string): boolean {
 }
 
 /**
+ * Normalizes common speech-to-text / Whisper phonetic mishearings for domain terms.
+ * e.g., "ASU general" -> "EFU General", "A S U" -> "EFU", "AFU" -> "EFU"
+ */
+export function normalizePhoneticDomainTerms(text: string): string {
+  if (!text) return text;
+  let normalized = text;
+  normalized = normalized.replace(/\b(a\s*s\s*u|asu|a\s*f\s*u|afu)\b/gi, 'EFU');
+  return normalized;
+}
+
+/**
  * Contextualize short follow-up questions ("What about motor?", "Other insurances?", "How much does it cost?")
- * using preceding dialogue context for vector search retrieval.
+ * using preceding dialogue context for vector search retrieval. Also applies domain phonetic normalization.
  */
 export function contextualizeQuery(text: string, previousTurnText?: string): string {
   if (!text) return text;
-  const trimmed = text.trim();
+  let trimmed = text.trim();
+  trimmed = normalizePhoneticDomainTerms(trimmed);
   const words = trimmed.split(/\s+/).filter(w => w.length > 0);
 
   // If query is short (< 7 words) or contains follow-up pronouns

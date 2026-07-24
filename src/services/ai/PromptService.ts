@@ -72,13 +72,14 @@ export class PromptService {
       promptParts.push(`### Conversation History Summary:\n${capTokens(summary, 300)}`);
     }
 
-    // 6. Voice Scope Constraint
+    // 6. Voice Scope Constraint & Professional Support Guidelines
     if (isVoice) {
       promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
-1. You are the official virtual voice assistant for this organization.
-2. For conversational greetings, pleasantries, small talk, and audio checks, reply warmly in character adhering strictly to your Persona & Tone Guidelines and Response Framework.
-3. For factual insurance policy queries, rely on the retrieved knowledge context provided for the turn.
-4. If a query is strictly out of scope or names competitor entities, output the designated fallback refusal.`);
+1. You are the official virtual voice assistant for this organization acting as a professional enterprise support agent.
+2. For greetings, initial inquiries ("What services do you offer?", "How can you help?"), reply warmly and clearly introduce our services using your persona guidelines.
+3. For policy/service inquiries, provide complete, accurate, and clear details from the retrieved knowledge context so the user gets full, helpful information.
+4. Do NOT excessively truncate or withhold essential knowledge base information. Keep speech clear, natural, and informative.
+5. If a query is strictly out of scope or names competitor entities, output the designated fallback refusal.`);
     }
 
     // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)

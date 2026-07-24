@@ -8,6 +8,9 @@ export interface MessageRecord {
   createdAt?: Date;
 }
 
+// In-memory cache for session rolling summaries to avoid re-summarizing on every turn
+const sessionSummaryCache = new Map<number, { summary: string; messageCount: number }>();
+
 export class ConversationService {
   /**
    * Load recent messages and summary for a session
@@ -69,8 +72,16 @@ export class ConversationService {
         createdAt: c.createdAt
       }));
 
-      // Generate rolling summary of older messages
-      summary = await this.summarizeMessages(olderMessages);
+      // Token optimization: check cache first; re-summarize only if >= 6 new messages accumulated
+      const cached = sessionSummaryCache.get(sessionId);
+      if (cached && (conversations.length - cached.messageCount < 6)) {
+        summary = cached.summary;
+      } else {
+        summary = await this.summarizeMessages(olderMessages);
+        if (summary) {
+          sessionSummaryCache.set(sessionId, { summary, messageCount: conversations.length });
+        }
+      }
     } else {
       recentMessages = conversations.map(c => ({
         sender: c.sender as any,
