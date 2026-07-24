@@ -47,7 +47,11 @@ export class PromptService {
       return text.substring(0, maxChars) + '... [truncated]';
     };
 
-    const basePrompt = agent.systemPrompt || 'You are a helpful AI Virtual Customer Assistant.';
+    const tenantName = agent.name?.trim() || 'EFU General Insurance';
+    let basePrompt = agent.systemPrompt || '';
+    if (!basePrompt || basePrompt.includes('V3C Platform')) {
+      basePrompt = `You are the official AI Virtual Customer Assistant for ${tenantName}. Answer visitor questions clearly and accurately regarding ${tenantName} services, insurance policies, motor, health, travel, fire, and marine coverage options.`;
+    }
 
     let promptParts: string[] = [];
 
@@ -72,26 +76,26 @@ export class PromptService {
       promptParts.push(`### Conversation History Summary:\n${capTokens(summary, 300)}`);
     }
 
-    // 6. Voice Scope Constraint & Professional Support Guidelines
+    // 6. Voice Scope Constraint & Strict Knowledge Base Protocol
     if (isVoice) {
-      promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
-1. You are the official virtual voice assistant for this organization acting as a professional enterprise support agent.
-2. For greetings, initial inquiries ("What services do you offer?", "How can you help?"), reply warmly and clearly introduce our services using your persona guidelines.
-3. For policy/service inquiries, provide complete, accurate, and clear details from the retrieved knowledge context so the user gets full, helpful information.
-4. Do NOT excessively truncate or withhold essential knowledge base information. Keep speech clear, natural, and informative.
-5. If a query is strictly out of scope or names competitor entities, output the designated fallback refusal.`);
+      promptParts.push(`### CRITICAL VOICE SYSTEM RULES (STRICT EFU SCOPE):
+1. You are the official virtual customer support assistant EXCLUSIVELY for EFU General Insurance.
+2. For standard greetings and pleasantries ("Hello", "Salam", "How are you?"), reply warmly in character.
+3. For all service, policy, and coverage inquiries, you MUST rely ONLY on the official retrieved EFU knowledge base context provided for the turn.
+4. STRICT SCOPE GUARD: Do NOT answer general knowledge, coding, math, world news, or non-EFU queries using outside model memory.
+5. If a question is outside our official EFU Knowledge Base or asks about non-EFU topics/competitors, you MUST output the designated fallback refusal.`);
     }
 
     // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
     if (retrievedContext && retrievedContext.trim()) {
-      promptParts.push(`### CRITICAL RULE — Ground Truth Knowledge Base Context (MUST FOLLOW):\n` +
+      promptParts.push(`### CRITICAL RULE — EFU Knowledge Base Ground Context (STRICT GROUNDING):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
-        `1. Answer using ONLY the information from this knowledge base when relevant.\n` +
-        `2. Reproduce exact details and facts without making up policies.\n` +
-        `3. If the question is outside this context, follow the guardrails protocol.\n\n` +
+        `1. Answer using ONLY the information from this knowledge base.\n` +
+        `2. Reproduce exact details and facts without making up policies or referencing non-EFU entities.\n` +
+        `3. If the user question cannot be answered from this knowledge base, output the designated fallback refusal.\n\n` +
         `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
     } else {
-      promptParts.push(`### Knowledge Base Context:\nNo specific reference knowledge found for this query. Use established tenant guardrails.`);
+      promptParts.push(`### Knowledge Base Context:\nNo specific EFU reference knowledge found for this query. Strictly output designated fallback refusal.`);
     }
 
     return promptParts.join('\n\n').trim();

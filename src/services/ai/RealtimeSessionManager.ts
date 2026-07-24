@@ -86,6 +86,7 @@ export class RealtimeSessionManager {
   // Lifecycle guards
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
+  private isResponseInProgress: boolean = false;
 
   private agentId?: string;
   private publicKey?: string;
@@ -98,6 +99,18 @@ export class RealtimeSessionManager {
     this.publicKey = params.publicKey;
     this.slug = params.slug;
     this.language = params.language === 'ur' ? 'Urdu' : 'English';
+  }
+
+  private sendResponseCreate(payload: any) {
+    if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
+    if (this.isResponseInProgress) {
+      console.log(`[PIPELINE] ⚠️ Active response in progress — sending response.cancel before creating new response`);
+      try {
+        this.openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
+      } catch (_) {}
+      this.isResponseInProgress = false;
+    }
+    this.openAiWs.send(JSON.stringify(payload));
   }
 
   async start(): Promise<void> {
@@ -263,12 +276,12 @@ export class RealtimeSessionManager {
           console.log(`[SESSION LIFECYCLE] GREETING SEND (verbatim, once only) — "${greetingText}"`);
 
           if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            this.openAiWs.send(JSON.stringify({
+            this.sendResponseCreate({
               type: 'response.create',
               response: {
                 instructions: `You MUST speak EXACTLY the following text, word for word, with no additions, modifications, or reinterpretation: "${greetingText}"`,
               },
-            }));
+            });
           }
 
           if (!this.sessionReadySent && this.socket.readyState === WebSocket.OPEN) {
@@ -298,11 +311,13 @@ export class RealtimeSessionManager {
       }
 
       if (event.type === 'response.created') {
+        this.isResponseInProgress = true;
         const isGreeting = !this.pendingTurnAudit && this.greetingSent && this.aiTranscriptBuffer === '';
         console.log(`[PIPELINE ${ts()}] ⚡ response.created${isGreeting ? ' [GREETING — expected]' : ' [USER TURN]'}`);
       }
 
-      if (event.type === 'response.done') {
+      if (event.type === 'response.done' || event.type === 'response.cancelled') {
+        this.isResponseInProgress = false;
         console.log(`[PIPELINE ${ts()}] ↓ response.done`);
       }
 
@@ -386,7 +401,7 @@ export class RealtimeSessionManager {
 
         console.log(`[PIPELINE ${ts()}] ↓ transcription.completed — "${userSpeech.substring(0, 80)}"`);
 
-        // 3. Dominant Language Classification & Session Language Memory (#4, #9)
+        // 3. Dominant Language Classification & Per-Turn Language Matching
         const prevLang = this.sessionPreferredLanguage;
         const dominantLang = detectDominantLanguage(userSpeech);
 
@@ -403,7 +418,8 @@ export class RealtimeSessionManager {
           }
         }
 
-        const detectedLanguage: 'English' | 'Urdu' | 'RomanUrdu' = this.sessionPreferredLanguage || dominantLang;
+        // Match the current turn's dominant spoken language
+        const detectedLanguage: 'English' | 'Urdu' | 'RomanUrdu' = dominantLang;
         const isUrdu = detectedLanguage === 'Urdu' || detectedLanguage === 'RomanUrdu';
 
         // Save visitor turn to DB
@@ -465,12 +481,12 @@ export class RealtimeSessionManager {
 
           this.lastUserTurn = userSpeech;
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SYSTEM PROMPT PERSONA PATH]`);
-          this.openAiWs.send(JSON.stringify({
+          this.sendResponseCreate({
             type: 'response.create',
             response: {
               instructions: `[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional enterprise support agent. If asked about our services or company overview, introduce our primary services clearly.`,
             },
-          }));
+          });
           return;
         }
 
@@ -522,12 +538,12 @@ export class RealtimeSessionManager {
 
           this.lastUserTurn = userSpeech;
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [COMPETITOR GUARD fallback]`);
-          this.openAiWs.send(JSON.stringify({
+          this.sendResponseCreate({
             type: 'response.create',
             response: {
               instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
             },
-          }));
+          });
           return;
         }
 
@@ -591,20 +607,20 @@ export class RealtimeSessionManager {
         }
 
         if (retrieval.fallbackTriggered) {
-          // ── Soft Fallback — allow GPT to answer domain queries politely ──────
+          // ── Strict Out-of-Scope Fallback Refusal ──────────────────────────────────
           const fallbackText = isUrdu
             ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu ||
               'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔'
             : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage ||
               'I can only answer questions related to our services and official knowledge base.';
 
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SOFT FALLBACK WITH DOMAIN CONTEXT]`);
-          this.openAiWs.send(JSON.stringify({
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE FALLBACK REFUSAL]`);
+          this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `[VOICE TURN INSTRUCTIONS]\nUser query: "${userSpeech}"\nIf this query asks about our services, company overview, or insurance products (handling minor speech-to-text mishearings like "ASU" for "EFU"), act as a professional enterprise support agent and answer warmly with complete, clear information about what we offer.\nIf the query is strictly out of scope or asks about competitors, respond politely with: "${fallbackText}"`,
+              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
             },
-          }));
+          });
         } else {
           // ── RAG — inject retrieved context TURN-SCOPED inside response.create (Token Optimized) ──────
           const contextOnly = retrieval.contextText;
@@ -612,12 +628,12 @@ export class RealtimeSessionManager {
 
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [TOKEN OPTIMIZED TURN-SCOPED RAG] (${retrieval.chunks.length} chunks) — pipeline: ${totalPipelineMs}ms`);
 
-          this.openAiWs.send(JSON.stringify({
+          this.sendResponseCreate({
             type: 'response.create',
             response: {
               instructions: `[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Act as an enterprise support agent and answer the user's question clearly, completely, and accurately in ${detectedLanguage} using this context. Do not truncate important details]:\n${contextOnly}`,
             },
-          }));
+          });
         }
       }
     });

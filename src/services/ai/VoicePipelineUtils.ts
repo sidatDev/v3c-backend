@@ -61,8 +61,9 @@ export function isNoisyTranscript(
   const words = trimmed.split(/\s+/).filter(w => w.length > 0);
   if (words.length < minWordCount) {
     const singleWord = words[0]?.toLowerCase().replace(/[^a-z\u0600-\u06FF]/g, '');
-    if (!singleWord || singleWord.length < 5) return true;
-    if (['hello', 'hi', 'assalam', 'salam', 'help'].includes(singleWord)) return false;
+    const validGreetings = ['hello', 'hi', 'assalam', 'salam', 'help', 'ہلو', 'ہیلو', 'السلام', 'سلام', 'جی'];
+    if (validGreetings.includes(singleWord)) return false;
+    if (!singleWord || singleWord.length < 4) return true;
     if (FILLER_PATTERNS.some(p => p.test(singleWord))) return true;
   }
 
@@ -155,9 +156,15 @@ export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'Roma
   if (!text || text.trim().length === 0) return 'English';
 
   const trimmed = text.trim();
-  const urduScriptChars = (trimmed.match(/[\u0600-\u06FF]/g) || []).length;
-  
-  if (urduScriptChars > trimmed.length * 0.2 || urduScriptChars >= 3) {
+  const latinWords = (trimmed.match(/\b[a-zA-Z]{2,}\b/g) || []).length;
+  const urduWords = (trimmed.match(/[\u0600-\u06FF]+/g) || []).length;
+
+  // If sentence has majority Latin/English words (e.g. "services do you provide"), classify as English
+  if (latinWords > urduWords) {
+    return 'English';
+  }
+
+  if (urduWords > 0 && urduWords >= latinWords) {
     return 'Urdu';
   }
 
