@@ -9,6 +9,7 @@ export interface ChatParams {
   sessionId?: number;
   agentId?: string;
   publicKey?: string;
+  slug?: string;
   message: string;
   language?: string;
 }
@@ -25,10 +26,10 @@ export class ChatService {
    * Process incoming text chat request using the unified AI pipeline
    */
   static async handleChat(params: ChatParams): Promise<ChatResult> {
-    const { sessionId, agentId, publicKey, message, language = 'en' } = params;
+    const { sessionId, agentId, publicKey, slug, message, language = 'en' } = params;
 
     // 1. Resolve Tenant Configuration from Cache
-    const tenantConfig = await TenantConfigCache.getTenantConfig(publicKey, agentId);
+    const tenantConfig = await TenantConfigCache.getTenantConfig(publicKey, agentId, slug);
     const { tenantId, agent } = tenantConfig;
 
     // 2. Load Session Memory & Save Visitor Message

@@ -49,6 +49,7 @@ export interface VoiceSessionParams {
   sessionId?: string;
   agentId?: string;
   publicKey?: string;
+  slug?: string;
   language?: string;
 }
 
@@ -73,12 +74,14 @@ export class RealtimeSessionManager {
 
   private agentId?: string;
   private publicKey?: string;
+  private slug?: string;
 
   constructor(params: VoiceSessionParams) {
     this.socket = params.socket;
     this.sessionIdNum = params.sessionId ? parseInt(params.sessionId, 10) : null;
     this.agentId = params.agentId;
     this.publicKey = params.publicKey;
+    this.slug = params.slug;
     this.language = params.language === 'ur' ? 'Urdu' : 'English';
   }
 
@@ -92,7 +95,7 @@ export class RealtimeSessionManager {
 
     // ── 1. Resolve Tenant Configuration ──────────────────────────────────────
     try {
-      this.tenantConfig = await TenantConfigCache.getTenantConfig(this.publicKey, this.agentId);
+      this.tenantConfig = await TenantConfigCache.getTenantConfig(this.publicKey, this.agentId, this.slug);
     } catch (err: any) {
       StructuredLogger.error('[SESSION] Failed to resolve tenant config', { error: err?.message });
       this.socket.send(JSON.stringify({ type: 'error', message: 'Tenant configuration failure' }));

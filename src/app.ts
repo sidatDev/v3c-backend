@@ -52,7 +52,26 @@ app.register(cors, {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
 });
 
-// 2. Register Cookie Parser, Multipart, and WebSocket
+import rateLimit from '@fastify/rate-limit';
+
+// 2. Register Rate Limit, Cookie Parser, Multipart, and WebSocket
+app.register(rateLimit, {
+  max: 100,
+  timeWindow: '1 minute',
+  keyGenerator: (req) => {
+    const ip = req.headers['x-forwarded-for'] || req.ip;
+    const body = (req.body as any) || {};
+    const query = (req.query as any) || {};
+    const slug = body.slug || query.slug || '';
+    return slug ? `${ip}-${slug}` : `${ip}`;
+  },
+  errorResponseBuilder: (req, context) => ({
+    statusCode: 429,
+    error: 'Too Many Requests',
+    message: `Rate limit exceeded. Try again in ${Math.ceil(context.ttl / 1000)} seconds.`
+  })
+});
+
 app.register(cookie);
 app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 app.register(websocket);

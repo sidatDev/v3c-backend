@@ -9,18 +9,31 @@ import { VoiceService } from '../services/ai/VoiceService';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
-  // Helper to validate Public Key & Agent ID
-  async function validatePublicAccess(publicKey?: string, agentId?: string) {
+  // Helper to validate Public Key / Slug & Agent ID
+  async function validatePublicAccess(publicKey?: string, agentId?: string, slug?: string) {
     let domain = null;
     let tenantId = null;
 
     if (publicKey) {
+      console.warn('[DEPRECATION WARNING] Legacy publicKey parameter used in public access. Prefer slug-based routing /widget/:slug');
       domain = await prisma.domain.findFirst({
         where: { publicKey },
         include: { Tenant: true }
       });
       if (domain) {
         tenantId = domain.tenantId;
+      }
+    }
+
+    if (!tenantId && slug) {
+      const tenantBySlug = await prisma.tenant.findFirst({
+        where: { slug }
+      });
+      if (tenantBySlug) {
+        tenantId = tenantBySlug.id;
+        domain = await prisma.domain.findFirst({
+          where: { tenantId }
+        });
       }
     }
 
@@ -40,7 +53,7 @@ export default async function publicRoutes(fastify: FastifyInstance, options: Fa
       });
     }
 
-    // Fallback: If no publicKey or agentId specified, pick V3C agent or active agent
+    // Fallback: If no tenantId/slug specified, pick V3C agent or active agent
     if (!agent) {
       agent = await prisma.agent.findFirst({
         where: { name: { contains: 'V3C' } }
@@ -53,7 +66,7 @@ export default async function publicRoutes(fastify: FastifyInstance, options: Fa
     }
 
     if (!tenantId || !agent) {
-      throw new AppError('Invalid public key or agent ID. No default agent configured.', 404);
+      throw new AppError('Invalid tenant slug, public key, or agent ID. No default agent configured.', 404);
     }
 
     const tenant = await prisma.tenant.findUnique({
@@ -145,8 +158,38 @@ ${snippets}`;
     return { domain, tenant, agent, widgetConfig, tenantId, combinedSystemPrompt };
   }
 
+  // @route   GET /api/public/resolve/:slug
+  // @desc    Resolve a tenant slug to minimal bootstrap IDs (No public key returned)
+  fastify.get('/resolve/:slug', async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const tenant = await prisma.tenant.findFirst({
+      where: { slug }
+    });
+
+    if (!tenant) {
+      throw new AppError('Tenant not found for given slug', 404);
+    }
+
+    const agent = await prisma.agent.findFirst({
+      where: { tenantId: tenant.id }
+    });
+
+    return {
+      status: 'success',
+      data: {
+        tenantId: tenant.id,
+        agentId: agent?.id || null,
+        tenant: {
+          id: tenant.id,
+          name: tenant.name,
+          slug: tenant.slug
+        }
+      }
+    };
+  });
+
   // @route   GET /api/public/domains
-  // @desc    Get all registered domains and tenant slugs for public selector
+  // @desc    Get all registered domains and tenant slugs for public selector (Sanitized, no public key)
   fastify.get('/domains', async (request, reply) => {
     const domains = await prisma.domain.findMany({
       include: {
@@ -162,7 +205,6 @@ ${snippets}`;
       data: domains.map(d => ({
         id: d.id,
         domain: d.domain,
-        publicKey: d.publicKey,
         tenant: d.Tenant ? {
           id: d.Tenant.id,
           name: d.Tenant.name,
@@ -173,19 +215,15 @@ ${snippets}`;
   });
 
   // @route   GET /api/public/widget
-  // @desc    Get widget configuration & tenant metadata for public embedding
+  // @desc    Get widget configuration & tenant metadata for public embedding (OpenAI config isolated)
   fastify.get('/widget', async (request, reply) => {
-    const { publicKey, agentId } = request.query as { publicKey?: string; agentId?: string };
+    const { publicKey, agentId, slug } = request.query as { publicKey?: string; agentId?: string; slug?: string };
 
-    const { tenant, agent, widgetConfig, tenantId } = await validatePublicAccess(publicKey, agentId);
+    const { tenant, agent, widgetConfig, tenantId } = await validatePublicAccess(publicKey, agentId, slug);
 
     const quickQuestions = await prisma.quickQuestion.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'asc' }
-    });
-
-    const retrievalConfig = await prisma.retrievalConfig.findFirst({
-      where: { agentId: agent.id }
     });
 
     const topicLinks = await prisma.agentTopicLink.findMany({
@@ -197,6 +235,19 @@ ${snippets}`;
     // Check if domain/widget is active
     const isActive = widgetConfig?.isActive ?? true;
 
+    const configs = tenantId ? await prisma.configuration.findMany({ where: { tenantId } }) : [];
+    const brandingMap: Record<string, string> = {};
+    configs.forEach(c => {
+      if (c.value) brandingMap[c.key] = c.value;
+    });
+
+    const branding = {
+      companyName: brandingMap.brand_company_name || tenant?.name || 'V3C Platform',
+      logoUrl: brandingMap.brand_logo_url || null,
+      faviconUrl: brandingMap.brand_favicon_url || null,
+      accentColor: brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+    };
+
     return {
       status: 'success',
       data: {
@@ -205,27 +256,15 @@ ${snippets}`;
           name: tenant?.name,
           slug: tenant?.slug
         },
+        branding,
         agent: {
           id: agent.id,
           name: agent.name,
-          voice: agent.voice || 'alloy',
-          language: agent.language || 'English',
-          systemPrompt: agent.systemPrompt,
           initialGreetingMessage: agent.initialGreetingMessage || 'Hi! How can I help you today?',
           defaultMode: agent.defaultMode || 'VOICE',
           widgetMode: agent.widgetMode || 'BOTH',
           accentColor: agent.accentColor || '#bef264',
           launcherStyle: agent.launcherStyle || 'orb',
-          speechSpeed: agent.speechSpeed || 1.0,
-          autoLanguageDetection: agent.autoLanguageDetection ?? true,
-          supportedLanguages: agent.supportedLanguages || ['English'],
-          retrievalConfig: retrievalConfig ? {
-            similarityThreshold: retrievalConfig.similarityThreshold,
-            topK: retrievalConfig.topK,
-            fallbackMode: retrievalConfig.fallbackMode,
-            fallbackMessage: retrievalConfig.fallbackMessage,
-            fallbackMessageUrdu: retrievalConfig.fallbackMessageUrdu
-          } : null,
           topicLinks: topicLinks.map(t => ({ id: t.id, title: t.title, url: t.url }))
         },
         widget: {
@@ -253,14 +292,15 @@ ${snippets}`;
   // @route   POST /api/public/session
   // @desc    Create a new visitor session
   fastify.post('/session', async (request, reply) => {
-    const { publicKey, agentId, referrer, landingPage } = request.body as {
+    const { publicKey, agentId, slug, referrer, landingPage } = request.body as {
       publicKey?: string;
       agentId?: string;
+      slug?: string;
       referrer?: string;
       landingPage?: string;
     };
 
-    const { domain, tenantId, agent } = await validatePublicAccess(publicKey, agentId);
+    const { domain, tenantId, agent } = await validatePublicAccess(publicKey, agentId, slug);
 
     // Create or find anonymous visitor
     const visitorSecureId = `visitor-${Math.random().toString(36).substring(2, 10)}`;
@@ -301,10 +341,11 @@ ${snippets}`;
   // @route   POST /api/public/chat
   // @desc    Public text chat endpoint with RAG context & multi-language support
   fastify.post('/chat', async (request, reply) => {
-    const { sessionId, agentId, publicKey, message, language = 'en' } = request.body as {
+    const { sessionId, agentId, publicKey, slug, message, language = 'en' } = request.body as {
       sessionId?: number;
       agentId?: string;
       publicKey?: string;
+      slug?: string;
       message: string;
       language?: string;
     };
@@ -317,6 +358,7 @@ ${snippets}`;
       sessionId: sessionId ? Number(sessionId) : undefined,
       agentId,
       publicKey,
+      slug,
       message,
       language
     });
@@ -335,10 +377,11 @@ ${snippets}`;
   // @route   POST /api/public/lead
   // @desc    Submit visitor contact details (Lead capture)
   fastify.post('/lead', async (request, reply) => {
-    const { sessionId, agentId, publicKey, name, email, phone } = request.body as {
+    const { sessionId, agentId, publicKey, slug, name, email, phone } = request.body as {
       sessionId?: number;
       agentId?: string;
       publicKey?: string;
+      slug?: string;
       name: string;
       email?: string;
       phone?: string;
@@ -348,7 +391,7 @@ ${snippets}`;
       throw new AppError('Name is required for lead submission', 400);
     }
 
-    const { tenantId, agent } = await validatePublicAccess(publicKey, agentId);
+    const { tenantId, agent } = await validatePublicAccess(publicKey, agentId, slug);
 
     let visitorSessionId = null;
     let visitorId = null;
@@ -389,13 +432,14 @@ ${snippets}`;
   // @route   POST /api/public/quick-questions
   // @desc    Generate context-aware AI quick questions for the widget
   fastify.post('/quick-questions', async (request, reply) => {
-    const { publicKey, agentId, language = 'en' } = request.body as {
+    const { publicKey, agentId, slug, language = 'en' } = request.body as {
       publicKey?: string;
       agentId?: string;
+      slug?: string;
       language?: string;
     };
 
-    const { agent } = await validatePublicAccess(publicKey, agentId);
+    const { agent } = await validatePublicAccess(publicKey, agentId, slug);
 
     const langText = language === 'ur' ? 'Urdu' : 'English';
     const prompt = `
@@ -446,7 +490,7 @@ Return ONLY a valid JSON array of strings, for example:
   // @route   POST /api/public/session/end
   // @desc    End visitor session
   fastify.post('/session/end', async (request, reply) => {
-    const { sessionId, publicKey } = request.body as { sessionId?: number; publicKey?: string };
+    const { sessionId, publicKey, slug } = request.body as { sessionId?: number; publicKey?: string; slug?: string };
 
     if (!sessionId) {
       return { status: 'success', message: 'No session specified' };
@@ -484,6 +528,7 @@ Return ONLY a valid JSON array of strings, for example:
       sessionId?: string;
       agentId?: string;
       publicKey?: string;
+      slug?: string;
       language?: string;
     };
 

@@ -78,6 +78,20 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('A role with this name already exists in the scope.', 400);
     }
 
+    // Pre-resolve permissions if supplied
+    let targetPerms: { id: string }[] = [];
+    if (permissions && Array.isArray(permissions) && permissions.length > 0) {
+      targetPerms = await prisma.permission.findMany({
+        where: {
+          OR: permissions.map((permKey: string) => {
+            const [resource, action] = permKey.split(':');
+            return { resource, action };
+          })
+        },
+        select: { id: true }
+      });
+    }
+
     const createdRole = await prisma.$transaction(async (tx) => {
       // 1. Create Role
       const role = await tx.role.create({
@@ -90,23 +104,15 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
         }
       });
 
-      // 2. Bind Permissions if supplied
-      if (permissions && Array.isArray(permissions)) {
-        for (const permKey of permissions) {
-          const [resource, action] = permKey.split(':');
-          const permission = await tx.permission.findFirst({
-            where: { resource, action }
-          });
-          
-          if (permission) {
-            await tx.rolePermission.create({
-              data: {
-                roleId: role.id,
-                permissionId: permission.id
-              }
-            });
-          }
-        }
+      // 2. Bind Permissions in bulk
+      if (targetPerms.length > 0) {
+        await tx.rolePermission.createMany({
+          data: targetPerms.map(p => ({
+            roleId: role.id,
+            permissionId: p.id
+          })),
+          skipDuplicates: true
+        });
       }
 
       return role;
@@ -143,8 +149,8 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Role not found.', 404);
     }
 
-    // Prevent modifying system built-in roles
-    if (role.isSystem) {
+    // Prevent modifying system built-in roles unless super admin
+    if (role.isSystem && !isSuperAdmin) {
       throw new AppError('Built-in system roles cannot be modified.', 403);
     }
 
@@ -153,25 +159,30 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('You do not have permission to modify roles outside your tenant.', 403);
     }
 
+    // 1. Resolve all target permissions in a single query
+    const targetPerms = permissions.length > 0 ? await prisma.permission.findMany({
+      where: {
+        OR: permissions.map((permKey: string) => {
+          const [resource, action] = permKey.split(':');
+          return { resource, action };
+        })
+      },
+      select: { id: true }
+    }) : [];
+
     await prisma.$transaction(async (tx) => {
-      // 1. Delete all existing mappings for the role
+      // 2. Delete all existing mappings for the role
       await tx.rolePermission.deleteMany({ where: { roleId } });
 
-      // 2. Create new mappings
-      for (const permKey of permissions) {
-        const [resource, action] = permKey.split(':');
-        const permission = await tx.permission.findFirst({
-          where: { resource, action }
+      // 3. Create new mappings in bulk
+      if (targetPerms.length > 0) {
+        await tx.rolePermission.createMany({
+          data: targetPerms.map(p => ({
+            roleId,
+            permissionId: p.id
+          })),
+          skipDuplicates: true
         });
-        
-        if (permission) {
-          await tx.rolePermission.create({
-            data: {
-              roleId,
-              permissionId: permission.id
-            }
-          });
-        }
       }
     });
 

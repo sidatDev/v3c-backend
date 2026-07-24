@@ -12,14 +12,24 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   // @desc    Get tenant branding and website keys list
   fastify.get('/', { preHandler: [protect, restrictTo('domain', 'view')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      return { status: 'success', data: { branding: {}, websites: [] } };
-    }
+    const isSuperAdmin = request.user!.role === 'super_admin';
+
+    const configWhere = isSuperAdmin
+      ? {}
+      : tenantId
+      ? { tenantId }
+      : {};
+
+    const domainWhere = isSuperAdmin
+      ? {}
+      : tenantId
+      ? { OR: [{ tenantId }, { tenantId: null }] }
+      : {};
 
     const [configs, websites] = await Promise.all([
-      prisma.configuration.findMany({ where: { tenantId } }),
+      prisma.configuration.findMany({ where: configWhere }),
       prisma.domain.findMany({
-        where: { tenantId },
+        where: domainWhere,
         orderBy: { createdAt: 'desc' }
       })
     ]);
@@ -47,7 +57,8 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   // @desc    Update tenant branding (Company Name, Accent Color, SeaweedFS Logo/Favicon Upload)
   fastify.put('/branding', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
-    if (!tenantId) throw new AppError('Tenant ID missing', 400);
+    const isSuperAdmin = request.user!.role === 'super_admin';
+    if (!tenantId && !isSuperAdmin) throw new AppError('Tenant ID missing', 400);
 
     const isMultipart = request.isMultipart();
 
@@ -55,6 +66,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
     let accentColor: string | undefined;
     let logoUrl: string | undefined;
     let faviconUrl: string | undefined;
+    let targetDomainId: string | number | undefined;
 
     if (isMultipart) {
       const parts = request.parts();
@@ -62,7 +74,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
         if (part.type === 'file') {
           const buffer = await part.toBuffer();
           const ext = part.filename.split('.').pop() || 'png';
-          const fileKey = `branding/${tenantId}/${part.fieldname}-${randomUUID()}.${ext}`;
+          const fileKey = `branding/${tenantId || 'global'}/${part.fieldname}-${randomUUID()}.${ext}`;
           const s3Url = await uploadFileToS3(buffer, fileKey, part.mimetype);
 
           if (part.fieldname === 'logo') logoUrl = s3Url;
@@ -70,12 +82,26 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
         } else {
           if (part.fieldname === 'companyName') companyName = part.value as string;
           if (part.fieldname === 'accentColor') accentColor = part.value as string;
+          if (part.fieldname === 'domainId') targetDomainId = part.value as string;
         }
       }
     } else {
       const body = request.body as any;
       companyName = body.companyName;
       accentColor = body.accentColor;
+      targetDomainId = body.domainId;
+    }
+
+    let effectiveTenantId = tenantId;
+    if (targetDomainId) {
+      const domainRec = await prisma.domain.findUnique({ where: { id: Number(targetDomainId) } });
+      if (domainRec && domainRec.tenantId) {
+        effectiveTenantId = domainRec.tenantId;
+      }
+    }
+
+    if (!effectiveTenantId && !isSuperAdmin) {
+      throw new AppError('Tenant ID missing', 400);
     }
 
     const updates = [
@@ -88,7 +114,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
     for (const item of updates) {
       if (item.val !== undefined && item.val !== null) {
         const existingConfig = await prisma.configuration.findFirst({
-          where: { key: item.key, tenantId }
+          where: { key: item.key, tenantId: effectiveTenantId }
         });
 
         if (existingConfig) {
@@ -101,7 +127,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
             data: {
               key: item.key,
               value: item.val,
-              tenantId,
+              tenantId: effectiveTenantId,
               updatedAt: new Date()
             }
           });
@@ -148,12 +174,13 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   // @desc    Regenerate public and private keys for a domain
   fastify.post('/websites/:id/regenerate-keys', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
+    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid Domain ID', 400);
 
     const existing = await prisma.domain.findUnique({ where: { id } });
-    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+    if (!existing || (!isSuperAdmin && tenantId && existing.tenantId !== tenantId)) {
       throw new AppError('Domain not found', 404);
     }
 
@@ -175,12 +202,13 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   // @route   DELETE /api/domain/websites/:id
   fastify.delete('/websites/:id', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
+    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid Domain ID', 400);
 
     const existing = await prisma.domain.findUnique({ where: { id } });
-    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+    if (!existing || (!isSuperAdmin && tenantId && existing.tenantId !== tenantId)) {
       throw new AppError('Domain not found', 404);
     }
 

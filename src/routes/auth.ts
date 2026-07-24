@@ -165,6 +165,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           email: result.user.email,
           role: 'manager',
           tenantId: result.tenant.id,
+          tenantSlug: result.tenant.slug,
           companyName: result.tenant.name
         },
         permissions
@@ -270,6 +271,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           email: user.email,
           role: primaryRole,
           tenantId: user.tenantId,
+          tenantSlug: user.Tenant?.slug || 'v3c-system-tenant',
           domainId: user.domainId,
           companyName: user.Tenant?.name || null
         },
@@ -280,16 +282,33 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
 
   // @route   GET /api/auth/me
   // @desc    Get current user profile and permissions from session
-  fastify.get('/me', { preHandler: protect }, async (request, reply) => {
+  fastify.get('/me', async (request, reply) => {
+    let token: string | undefined;
+
+    if (request.cookies && request.cookies.token) {
+      token = request.cookies.token;
+    } else if (request.headers.authorization && request.headers.authorization.startsWith('Bearer')) {
+      token = request.headers.authorization.split(' ')[1];
+    }
+
+    if (!token) {
+      return { status: 'success', data: null };
+    }
+
+    try {
+      await protect(request, reply);
+    } catch {
+      return { status: 'success', data: null };
+    }
+
     const userPayload = request.user!;
-    
     const user = await prisma.user.findUnique({
       where: { id: userPayload.userId },
       include: { Tenant: true }
     });
 
     if (!user || user.status !== 'active') {
-      throw new AppError('User belonging to this token no longer exists.', 401);
+      return { status: 'success', data: null };
     }
 
     return {
@@ -301,6 +320,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           email: user.email,
           role: userPayload.role,
           tenantId: user.tenantId,
+          tenantSlug: user.Tenant?.slug || 'v3c-system-tenant',
           domainId: user.domainId,
           companyName: user.Tenant?.name || null,
           image: user.image

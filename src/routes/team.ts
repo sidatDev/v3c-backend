@@ -13,10 +13,73 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
     const tenantId = request.user!.tenantId;
     const isSuperAdmin = request.user!.role === 'super_admin';
 
+    const pageParam = (request.query as any).page;
+    const limitParam = (request.query as any).limit;
+    
+    const where = {
+      ...(tenantId && !isSuperAdmin ? { tenantId } : {})
+    };
+
+    if (pageParam !== undefined || limitParam !== undefined) {
+      const page = Math.max(1, parseInt(pageParam) || 1);
+      const limit = Math.max(1, Math.min(100, parseInt(limitParam) || 10));
+      const skip = (page - 1) * limit;
+
+      const [total, users] = await Promise.all([
+        prisma.user.count({ where }),
+        prisma.user.findMany({
+          where,
+          skip,
+          take: limit,
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
+            status: true,
+            image: true,
+            lastLogin: true,
+            createdAt: true,
+            domainId: true,
+            UserRole: {
+              include: {
+                Role: true
+              }
+            }
+          },
+          orderBy: { createdAt: 'desc' }
+        })
+      ]);
+
+      const formatted = users.map(u => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        status: u.status,
+        image: u.image,
+        lastLogin: u.lastLogin,
+        createdAt: u.createdAt,
+        roleName: u.UserRole[0]?.Role.name || u.role,
+        roleId: u.UserRole[0]?.roleId || null,
+        domainId: u.domainId || null
+      }));
+
+      return {
+        status: 'success',
+        data: formatted,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    }
+
     const users = await prisma.user.findMany({
-      where: {
-        ...(tenantId && !isSuperAdmin ? { tenantId } : {})
-      },
+      where,
       select: {
         id: true,
         name: true,

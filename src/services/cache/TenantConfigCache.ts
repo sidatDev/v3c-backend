@@ -18,8 +18,8 @@ export class TenantConfigCache {
   private static cache: Map<string, CacheEntry> = new Map();
   private static TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  static async getTenantConfig(publicKey?: string, agentId?: string): Promise<TenantConfig> {
-    const cacheKey = `tenant:${publicKey || 'none'}:${agentId || 'none'}`;
+  static async getTenantConfig(publicKey?: string, agentId?: string, slug?: string): Promise<TenantConfig> {
+    const cacheKey = `tenant:${slug || 'noslug'}:${publicKey || 'nokey'}:${agentId || 'noagent'}`;
     const now = Date.now();
     const existing = this.cache.get(cacheKey);
 
@@ -28,9 +28,16 @@ export class TenantConfigCache {
     }
 
     let domain = null;
-    let tenantId = null;
+    let tenantId: string | null = null;
 
-    if (publicKey) {
+    if (slug) {
+      const tenantBySlug = await prisma.tenant.findFirst({ where: { slug } });
+      if (tenantBySlug) {
+        tenantId = tenantBySlug.id;
+      }
+    }
+
+    if (!tenantId && publicKey) {
       domain = await prisma.domain.findFirst({
         where: { publicKey },
         include: { Tenant: true }

@@ -97,6 +97,59 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     return { status: 'success', data: entry };
   });
 
+  // @route   PUT /api/kb/custom/:id
+  fastify.put('/custom/:id', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
+    const tenantId = request.user!.tenantId;
+    const id = parseInt((request.params as any).id);
+    const { content, fileName } = request.body as any;
+
+    if (isNaN(id)) throw new AppError('Invalid ID', 400);
+
+    const existing = await prisma.knowledgeBaseEntry.findUnique({ where: { id } });
+    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+      throw new AppError('Entry not found', 404);
+    }
+
+    const updated = await prisma.knowledgeBaseEntry.update({
+      where: { id },
+      data: {
+        ...(fileName ? { fileName } : {}),
+        ...(content ? { content } : {}),
+        updatedAt: new Date()
+      }
+    });
+
+    if (content && content !== existing.content) {
+      // Clear existing chunks and regenerate vector embeddings
+      await prisma.documentChunk.deleteMany({ where: { entryId: id } });
+      const chunks = chunkText(content);
+      for (const chunk of chunks) {
+        const chunkId = randomUUID();
+        await prisma.documentChunk.create({
+          data: {
+            id: chunkId,
+            content: chunk,
+            entryId: id,
+            tenantId: tenantId || null
+          }
+        });
+
+        try {
+          const embedding = await generateEmbedding(chunk);
+          const embeddingSql = `[${embedding.join(',')}]`;
+          await prisma.$executeRawUnsafe(
+            `UPDATE "DocumentChunk" SET embedding = '${embeddingSql}'::vector WHERE id = '${chunkId}'`
+          );
+        } catch (err) {
+          console.warn('Vector embedding generation failed for chunk on update:', err);
+        }
+      }
+    }
+
+    TenantConfigCache.invalidate(tenantId || undefined);
+    return { status: 'success', data: updated };
+  });
+
   // @route   DELETE /api/kb/custom/:id
   fastify.delete('/custom/:id', { preHandler: [protect, restrictTo('knowledge_base', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
@@ -422,6 +475,35 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
     reply.status(201);
     return { status: 'success', data: newVer };
+  });
+
+  // @route   PUT /api/kb/persona/versions/:id
+  fastify.put('/persona/versions/:id', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
+    const tenantId = request.user!.tenantId;
+    const versionId = (request.params as any).id;
+    const { name, tone, language, instructions } = request.body as any;
+
+    const ver = await prisma.personaVersion.findUnique({
+      where: { id: versionId },
+      include: { Persona_PersonaVersion_personaIdToPersona: true }
+    });
+
+    if (!ver || (tenantId && ver.Persona_PersonaVersion_personaIdToPersona.tenantId !== tenantId)) {
+      throw new AppError('Persona version not found', 404);
+    }
+
+    const updatedVer = await prisma.personaVersion.update({
+      where: { id: versionId },
+      data: {
+        ...(name ? { name } : {}),
+        ...(tone ? { tone } : {}),
+        ...(language ? { language } : {}),
+        ...(instructions ? { instructions } : {})
+      }
+    });
+
+    TenantConfigCache.invalidate(tenantId || undefined);
+    return { status: 'success', data: updatedVer };
   });
 
   // @route   PUT /api/kb/persona/versions/:id/activate
