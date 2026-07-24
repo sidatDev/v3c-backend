@@ -37,8 +37,8 @@ export class PromptService {
     }
 
     const genderInstruction = isFemaleVoice
-      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs and agreement (e.g. use "saktee hoon", "karr saktee hoon", "rahee hoon", "hoon"). NEVER use male grammatical gender endings like "sakta hoon", "karta hoon", or "raha hoon".'
-      : 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, use male first-person grammatical verbs and agreement (e.g. use "sakta hoon", "karta hoon", "raha hoon").';
+      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs and agreement (e.g. use "samajhtee hoon", "samajhti hoon", "saktee hoon", "karr saktee hoon", "rahee hoon", "karti hoon"). NEVER use male grammatical gender endings like "samajhta hoon", "sakta hoon", "karta hoon", or "raha hoon".'
+      : 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, use male first-person grammatical verbs and agreement (e.g. use "samajhta hoon", "sakta hoon", "karta hoon", "raha hoon").';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
     const capTokens = (text: string, maxTokens: number): string => {

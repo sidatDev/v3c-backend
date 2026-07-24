@@ -181,7 +181,7 @@ export class RealtimeSessionManager {
               format: { type: 'audio/pcm', rate: 24000 },
               transcription: {
                 model: 'gpt-realtime-whisper',
-                language: (this.language === 'Urdu' || agent.language === 'Urdu' || (agent.supportedLanguages && agent.supportedLanguages.includes('Urdu'))) ? 'ur' : undefined,
+                language: (this.language === 'Urdu' && !agent.autoLanguageDetection) ? 'ur' : undefined,
               },
               turn_detection: {
                 type: 'server_vad',
