@@ -2,12 +2,14 @@ FROM node:20-alpine AS builder
 RUN apk add --no-cache openssl
 WORKDIR /app
 
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
 COPY package*.json ./
 RUN npm ci
 
 # Copy Prisma files and generate client
 COPY prisma ./prisma
-RUN npm run prisma:generate
+RUN npx prisma generate
 
 COPY . .
 RUN npm run build
