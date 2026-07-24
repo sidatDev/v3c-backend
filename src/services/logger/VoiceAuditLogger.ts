@@ -16,10 +16,10 @@ export interface VoiceAuditRecord {
   topMatches: { chunkId: string; similarity: number }[];
   similarityThreshold: number;
   highestSimilarity: number;
-  decision: 'RAG' | 'OUT_OF_SCOPE' | 'IGNORED_NOISE';
+  decision: 'RAG' | 'OUT_OF_SCOPE' | 'IGNORED_NOISE' | 'CONVERSATIONAL_GREETING' | 'CONVERSATIONAL_AFFIRMATION';
   fallbackTriggered: boolean;
   gptInvoked: boolean;
-  responseType: 'RAG' | 'Fallback' | 'Ignored';
+  responseType: 'RAG' | 'Fallback' | 'Ignored' | 'SystemPrompt';
   retrievedSources: number;
   voice: string;
   latencyMs: number;

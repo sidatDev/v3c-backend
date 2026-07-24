@@ -9,7 +9,10 @@ import {
   isNoisyTranscript,
   normalizeHindiToUrdu,
   detectDominantLanguage,
-  computeThinkingDelay
+  computeThinkingDelay,
+  isConversationalGreeting,
+  isConversationalAffirmation,
+  contextualizeQuery
 } from './VoicePipelineUtils';
 
 // ── Competitor / out-of-tenant entity guard ──────────────────────────────────
@@ -67,6 +70,9 @@ export class RealtimeSessionManager {
   // Session-level language memory & confidence tracking
   private sessionPreferredLanguage: 'English' | 'Urdu' | 'RomanUrdu' | null = null;
   private languageConfidenceStreak: number = 0;
+
+  // Track previous turn for multi-turn query contextualization
+  private lastUserTurn: string = '';
 
   // Turn counter for greeting replay protection & pipeline tracking
   private turnCount: number = 0;
@@ -216,7 +222,6 @@ export class RealtimeSessionManager {
       const msgStr = data.toString();
       const ts = () => new Date().toISOString();
 
-      // Pass every event straight to the browser client
       if (this.socket.readyState === WebSocket.OPEN) {
         this.socket.send(msgStr);
       }
@@ -252,7 +257,6 @@ export class RealtimeSessionManager {
         console.log(`  create_response    : ${cr === false ? 'FALSE ✅ (backend controls responses)' : 'TRUE ⚠'}`);
         console.log(`─────────────────────────────────────────────────────────\n`);
 
-        // Send verbatim greeting EXACTLY ONCE at session initialization
         if (!this.greetingSent && this.turnCount === 0) {
           this.greetingSent = true;
           const greetingText = agent.initialGreetingMessage || 'Assalam-u-Alaikum! How can I help you today?';
@@ -333,7 +337,7 @@ export class RealtimeSessionManager {
         }
       }
 
-      // ── CORE: Backend-authoritative RAG orchestration ─────────────────────
+      // ── CORE: Backend-authoritative RAG & Intent orchestration ─────────────
       if (
         event.type === 'conversation.item.input_audio_transcription.completed' &&
         event.transcript
@@ -392,7 +396,6 @@ export class RealtimeSessionManager {
           this.sessionPreferredLanguage = dominantLang;
           this.languageConfidenceStreak = 1;
         } else {
-          // Switch session preferred language if confidence streak builds or utterance is substantial
           if (this.languageConfidenceStreak >= 2 || userSpeech.split(/\s+/).length >= 4) {
             console.log(`[PIPELINE ${ts()}] 🌐 Session language switched: ${this.sessionPreferredLanguage} ➔ ${dominantLang}`);
             this.sessionPreferredLanguage = dominantLang;
@@ -416,7 +419,57 @@ export class RealtimeSessionManager {
           });
         }
 
-        // ── Tenant/entity guard — before any embedding ─────────────────────
+        // ── Intent Path A: Conversational Greetings & Affirmations ──────────
+        const isGreeting = isConversationalGreeting(userSpeech);
+        const isAffirmation = isConversationalAffirmation(userSpeech);
+
+        if (isGreeting || isAffirmation) {
+          const intentDecision = isGreeting ? 'CONVERSATIONAL_GREETING' : 'CONVERSATIONAL_AFFIRMATION';
+          console.log(`[PIPELINE ${ts()}] 💬 ${intentDecision} DETECTED: "${userSpeech}" — using Agent System Prompt, bypassing fallback`);
+
+          const greetingAudit: VoiceAuditRecord = {
+            conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
+            userTranscript: userSpeech,
+            detectedLanguage,
+            dominantLanguage: dominantLang,
+            previousSessionLanguage: prevLang || undefined,
+            finalResponseLanguage: detectedLanguage,
+            greetingReplayDetected: false,
+            ignoredTranscript: false,
+            transcriptLength: userSpeech.length,
+            wordCount: userSpeech.split(/\s+/).length,
+            thinkingDelayMs: 0,
+            retrievalLatencyMs: 0,
+            embeddingGenerated: false,
+            topMatches: [],
+            similarityThreshold: 0,
+            highestSimilarity: 0,
+            decision: intentDecision as any,
+            fallbackTriggered: false,
+            gptInvoked: true,
+            responseType: 'SystemPrompt',
+            retrievedSources: 0,
+            voice: this.selectedVoice,
+            latencyMs: Date.now() - this.turnStartTime,
+          };
+          this.pendingTurnAudit = greetingAudit;
+          VoiceAuditLogger.print(greetingAudit);
+
+          if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
+
+          // Apply natural thinking delay before natural persona response
+          const delayMs = computeThinkingDelay(Date.now() - tTranscriptDone, voiceResponseDelayMs);
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+
+          this.lastUserTurn = userSpeech;
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SYSTEM PROMPT PERSONA PATH]`);
+          this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
+          return;
+        }
+
+        // ── Competitor Shield Guard ──────────────────────────────────────────
         const competitorMatch = detectCompetitor(userSpeech, this.tenantConfig.agent.name);
         if (competitorMatch) {
           console.log(`[PIPELINE ${ts()}] 🚫 COMPETITOR DETECTED: "${competitorMatch}" — skipping retrieval, returning fallback immediately`);
@@ -457,12 +510,12 @@ export class RealtimeSessionManager {
 
           if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
 
-          // Natural thinking delay before fallback response
           const delayMs = computeThinkingDelay(Date.now() - tTranscriptDone, voiceResponseDelayMs);
           if (delayMs > 0) {
             await new Promise((r) => setTimeout(r, delayMs));
           }
 
+          this.lastUserTurn = userSpeech;
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [COMPETITOR GUARD fallback]`);
           this.openAiWs.send(JSON.stringify({
             type: 'response.create',
@@ -473,25 +526,25 @@ export class RealtimeSessionManager {
           return;
         }
 
-        // ── RetrievalService — identical to text chat endpoint ──────────────
+        // ── Intent Path B: Grounded Vector Search (RAG) ─────────────────────
         const threshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.3;
-        console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — threshold: ${threshold}`);
+        const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
+        console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — query: "${searchQuery.substring(0, 80)}", threshold: ${threshold}`);
 
         const retrieval = await RetrievalService.search(
           this.tenantConfig.tenantId,
-          userSpeech,
+          searchQuery,
           5,
           threshold,
         );
 
+        this.lastUserTurn = userSpeech;
         const retrievalMs = retrieval.timings.totalMs;
         console.log(`[PIPELINE ${ts()}] ↓ Retrieval DONE — topSimilarity: ${retrieval.topSimilarity.toFixed(3)}, chunks: ${retrieval.chunks.length}, fallback: ${retrieval.fallbackTriggered}`);
         console.log(`[PIPELINE ${ts()}]   Timings: embedding=${retrieval.timings.embeddingMs}ms, pgvector=${retrieval.timings.vectorSearchMs}ms, total=${retrievalMs}ms`);
 
-        // Compute natural thinking delay (#1)
         const thinkingDelayMs = computeThinkingDelay(retrievalMs, voiceResponseDelayMs);
 
-        // Build audit record
         const turnAudit: VoiceAuditRecord = {
           conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
           userTranscript: userSpeech,
@@ -525,21 +578,20 @@ export class RealtimeSessionManager {
 
         if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
 
-        // Apply natural thinking delay if retrieval was fast (#1)
         if (thinkingDelayMs > 0) {
           console.log(`[PIPELINE ${ts()}] ⏱ Natural thinking delay: ${thinkingDelayMs}ms before response.create()`);
           await new Promise((r) => setTimeout(r, thinkingDelayMs));
         }
 
         if (retrieval.fallbackTriggered) {
-          // ── Branch A: OUT_OF_SCOPE ─────────────────────────────────────────
+          // ── Strict Out-of-Scope Fallback ──────────────────────────────────
           const fallbackText = isUrdu
             ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu ||
               'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔'
             : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage ||
               'I can only answer questions related to our services and official knowledge base.';
 
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [FALLBACK]`);
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE FALLBACK]`);
           this.openAiWs.send(JSON.stringify({
             type: 'response.create',
             response: {
@@ -547,7 +599,7 @@ export class RealtimeSessionManager {
             },
           }));
         } else {
-          // ── Branch B: RAG — inject retrieved context for turn ─────────────
+          // ── RAG — inject retrieved context for turn ──────────────────────
           const contextOnly = retrieval.contextText;
 
           console.log(`[PIPELINE ${ts()}] → SENDING conversation.item.create [${retrieval.chunks.length} chunks]`);

@@ -1,7 +1,7 @@
 /**
  * VoicePipelineUtils.ts
  * Core utility functions for processing voice transcripts, language classification,
- * noise filtering, and response timing for the Realtime voice assistant.
+ * noise filtering, intent routing, and response timing for the Realtime voice assistant.
  */
 
 // Common filler/non-speech sound patterns from Whisper transcription
@@ -22,6 +22,21 @@ const ROMAN_URDU_KEYWORDS = new Set([
   'karna', 'karni', 'chahta', 'chahti', 'apne', 'apni', 'ka', 'bhi', 'hoga', 'hogi'
 ]);
 
+const GREETING_PATTERNS: RegExp[] = [
+  /\b(assalam|salam|alaikum|walekum|walaikum|hello|hi|hey|greetings|good\s*(morning|afternoon|evening|day))\b/i,
+  /\b(how\s*are\s*you|how\s*do\s*you\s*do|kaise\s*h?ai?n?|kya\s*haal|kya\s*hal|kaisay\s*h?ai?n?|kisi\s*ho)\b/i,
+  /\b(thank\s*you|thanks|shukriya|meherbani|jazakallah|allah\s*hafiz|bye|goodbye)\b/i,
+  /\b(who\s*are\s*you|what\s*is\s*your\s*name|aap\s*kaun\s*hai?n?|ap\s*kaun\s*hai?n?)\b/i,
+  /[\u0600-\u06FF]*(السلام|سلام|وعلیکم|ہیلو|شکریہ|خدا حافظ|اللہ حافظ|کیسے|کیسا)[\u0600-\u06FF]*/
+];
+
+const AFFIRMATION_PATTERNS: RegExp[] = [
+  /^(yes|no|yeah|yep|nope|sure|ok|okay|ji|haan|han|ji\s*haan|nhi|nahi|sahi|bilkul|theek|theek\s*hai)\.?$/i,
+  /\b(can\s*you\s*hear\s*me|am\s*i\s*audible|aawaz\s*aa\s*rahi\s*hai|sun\s*rah[ey]\s*ho)\b/i,
+  /\b(repeat|repeat\s*that|phir\s*se\s*batao|dobara\s*bataen)\b/i,
+  /[\u0600-\u06FF]*(جی|جی ہاں|ہاں|نہیں|بالکل|ٹھیک|آواز آرہی ہے)[\u0600-\u06FF]*/
+];
+
 /**
  * Check if a transcribed utterance is noise, filler, or too short to enter RAG
  */
@@ -34,15 +49,12 @@ export function isNoisyTranscript(
   const trimmed = text.trim();
   if (trimmed.length < minLength) return true;
 
-  // Check if string matches known filler patterns
   for (const pattern of FILLER_PATTERNS) {
     if (pattern.test(trimmed)) return true;
   }
 
-  // Count distinct words (alphanumeric sequences)
   const words = trimmed.split(/\s+/).filter(w => w.length > 0);
   if (words.length < minWordCount) {
-    // Single word: only allow if it's longer than 5 chars and not a simple noise word
     const singleWord = words[0]?.toLowerCase().replace(/[^a-z\u0600-\u06FF]/g, '');
     if (!singleWord || singleWord.length < 5) return true;
     if (['hello', 'hi', 'assalam', 'salam', 'help'].includes(singleWord)) return false;
@@ -53,24 +65,74 @@ export function isNoisyTranscript(
 }
 
 /**
+ * Check if a user utterance is a standard conversational greeting, pleasantry, or small talk.
+ * These utterances should use the Agent System Prompt & Instructions instead of triggering Out-Of-Scope fallback.
+ */
+export function isConversationalGreeting(text: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+  if (words.length > 10) return false;
+
+  for (const pattern of GREETING_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if a user utterance is a short affirmation, audio check, or confirmation ("Yes", "Ji", "Can you hear me?").
+ */
+export function isConversationalAffirmation(text: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+  if (words.length > 8) return false;
+
+  for (const pattern of AFFIRMATION_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Contextualize short follow-up questions ("What about motor?", "Other insurances?", "How much does it cost?")
+ * using preceding dialogue context for vector search retrieval.
+ */
+export function contextualizeQuery(text: string, previousTurnText?: string): string {
+  if (!text) return text;
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+
+  // If query is short (< 7 words) or contains follow-up pronouns
+  const isShortOrFollowup = words.length < 7 || /\b(it|other|others|this|that|also|more|cost|price|details|dono|doosri|doosra)\b/i.test(trimmed);
+
+  if (isShortOrFollowup && previousTurnText && previousTurnText.trim()) {
+    const cleanPrev = previousTurnText.trim().substring(0, 100);
+    return `${trimmed} (context: ${cleanPrev})`;
+  }
+
+  return trimmed;
+}
+
+/**
  * Normalizes Devanagari (Hindi) script characters that Whisper may emit.
- * Replaces known common Devanagari tokens or strips Devanagari characters
- * to ensure Hindi script never pollutes logs or DB.
  */
 export function normalizeHindiToUrdu(text: string): string {
   if (!text) return '';
-  // Check if text contains Devanagari characters (U+0900 to U+097F)
   const containsDevanagari = /[\u0900-\u097F]/.test(text);
   if (!containsDevanagari) return text;
 
-  // Remove Devanagari script characters or replace with empty space
   const cleaned = text.replace(/[\u0900-\u097F]+/g, ' ').replace(/\s+/g, ' ').trim();
   return cleaned;
 }
 
 /**
  * Determines the dominant language of a user utterance using token majority rule.
- * Fixes issue where a single trailing word (e.g. "yaar", "ji") flips an English query to Urdu.
  */
 export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'RomanUrdu' {
   if (!text || text.trim().length === 0) return 'English';
@@ -78,12 +140,10 @@ export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'Roma
   const trimmed = text.trim();
   const urduScriptChars = (trimmed.match(/[\u0600-\u06FF]/g) || []).length;
   
-  // If native Urdu script (Nastaliq) is dominant, it is Urdu
   if (urduScriptChars > trimmed.length * 0.2 || urduScriptChars >= 3) {
     return 'Urdu';
   }
 
-  // Tokenize words
   const words = trimmed.toLowerCase().split(/\s+/).map(w => w.replace(/[^a-z]/g, '')).filter(w => w.length > 0);
   if (words.length === 0) return 'English';
 
@@ -98,7 +158,6 @@ export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'Roma
     }
   }
 
-  // Majority classification
   if (romanUrduTokens > englishTokens) {
     return 'RomanUrdu';
   }
@@ -108,8 +167,6 @@ export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'Roma
 
 /**
  * Calculates the remaining natural thinking delay before calling response.create().
- * Ensures perception of natural speech timing (~400–800ms) without adding unnecessary delay
- * if retrieval already took significant time.
  */
 export function computeThinkingDelay(retrievalMs: number, targetDelayMs: number = 600): number {
   const remaining = targetDelayMs - retrievalMs;
