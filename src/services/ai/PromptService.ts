@@ -75,9 +75,10 @@ export class PromptService {
     // 6. Voice Scope Constraint
     if (isVoice) {
       promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
-1. You have ZERO general knowledge outside this specific tenant organization.
-2. For EVERY user question, you MUST run the 'searchKnowledge' tool first. Never reply without calling the tool.
-3. If the tool output indicates the query is out of scope or says '[CRITICAL OUT-OF-SCOPE REFUSAL]', you MUST respond exactly with the provided fallback message verbatim. Do NOT generate any other response.`);
+1. You are the official virtual voice assistant for this organization.
+2. For conversational greetings, pleasantries, small talk, and audio checks, reply warmly in character adhering strictly to your Persona & Tone Guidelines and Response Framework.
+3. For factual insurance policy queries, rely on the retrieved knowledge context provided for the turn.
+4. If a query is strictly out of scope or names competitor entities, output the designated fallback refusal.`);
     }
 
     // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
