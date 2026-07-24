@@ -18,11 +18,22 @@ export class PromptService {
     const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false } = params;
     const { agent, personaPrompt, guardrailsPrompt } = tenantConfig;
 
-    const basePrompt = agent.systemPrompt || 'You are a helpful AI Virtual Customer Assistant.';
+    const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+    const selectedVoiceLower = (agent.voice || 'shimmer').toLowerCase();
+    const isFemaleVoice = femaleVoices.includes(selectedVoiceLower);
 
-    const langInstruction = language === 'ur' || language === 'Urdu'
-      ? 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script.'
-      : 'CRITICAL: You MUST respond ONLY in English.';
+    let langInstruction = '';
+    if (agent.autoLanguageDetection) {
+      langInstruction = 'CRITICAL LANGUAGE MATCHING RULE: Automatically detect the language spoken by the user. If the user speaks in English, respond strictly in English. If the user speaks in Urdu or Roman Urdu, respond in Urdu.';
+    } else if (language === 'ur' || language === 'Urdu') {
+      langInstruction = 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script.';
+    } else {
+      langInstruction = 'CRITICAL: You MUST respond ONLY in English.';
+    }
+
+    const genderInstruction = isFemaleVoice
+      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs and agreement (e.g. use "saktee hoon", "karr saktee hoon", "rahee hoon", "hoon"). NEVER use male grammatical gender endings like "sakta hoon", "karta hoon", or "raha hoon".'
+      : 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, use male first-person grammatical verbs and agreement (e.g. use "sakta hoon", "karta hoon", "raha hoon").';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
     const capTokens = (text: string, maxTokens: number): string => {
@@ -31,13 +42,15 @@ export class PromptService {
       return text.substring(0, maxChars) + '... [truncated]';
     };
 
+    const basePrompt = agent.systemPrompt || 'You are a helpful AI Virtual Customer Assistant.';
+
     let promptParts: string[] = [];
 
     // 1. Base System Prompt (<800 tokens)
     promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 800)}`);
 
-    // 2. Language Constraint
-    promptParts.push(`### Language Rule:\n${langInstruction}`);
+    // 2. Language & Gender Constraints
+    promptParts.push(`### Language & Gender Rules:\n${langInstruction}\n\n${genderInstruction}`);
 
     // 3. Business Persona (if configured, <300 tokens)
     if (personaPrompt && personaPrompt.trim()) {

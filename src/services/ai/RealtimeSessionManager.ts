@@ -161,7 +161,6 @@ export class RealtimeSessionManager {
               format: { type: 'audio/pcm', rate: 24000 },
               transcription: {
                 model: 'gpt-realtime-whisper',
-                language: 'ur',
               },
               turn_detection: {
                 type: 'server_vad',
