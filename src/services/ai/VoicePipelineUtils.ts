@@ -4,11 +4,12 @@
  * noise filtering, intent routing, and response timing for the Realtime voice assistant.
  */
 
-// Common filler/non-speech sound patterns from Whisper transcription
 const FILLER_PATTERNS: RegExp[] = [
   /^[\s\.\,\?\!\-\_\:\;\"]+$/,
-  /^(a+h*|u+h*|h+m+|o+h*|e+r+|a+a+|u+m+)\.?$/i,
+  /^(a+h*|u+h*|h+m+|o+h*|e+r+|a+a+|u+m+|h+u+m+|h+m+m+)\.?$/i,
   /^(yeah|yep|nope|okay|ok|right|well|so)\.?$/i,
+  /^\(?\[?(cough|coughing|throat|clears throat|sigh|laughter|chuckle|snort|groan|gasp|noise|music|muffled|static)\]?\)?$/i,
+  /^[\(\[\{].*[\)\]\}]$/,
 ];
 
 const ROMAN_URDU_KEYWORDS = new Set([
