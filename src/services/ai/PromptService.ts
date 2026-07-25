@@ -55,8 +55,8 @@ export class PromptService {
 
     let promptParts: string[] = [];
 
-    // 1. Base System Prompt (<800 tokens)
-    promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 800)}`);
+    // 1. Base System Prompt (<2000 tokens / 8000 chars)
+    promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 2000)}`);
 
     // 2. Language & Gender Constraints
     promptParts.push(`### Language & Gender Rules:\n${langInstruction}\n\n${genderInstruction}`);

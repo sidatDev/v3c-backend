@@ -656,10 +656,12 @@ export class RealtimeSessionManager {
 
         const agentName = this.tenantConfig.agent.name?.trim() || 'EFU General Insurance';
 
+        const nonLifeMandate = `[STRICT NON-LIFE BOUNDARY]: ${agentName} is strictly a General (Non-Life) Insurance company (Motor, Health, Travel, Property, Marine, Engineering). ${agentName} DOES NOT offer, sell, or issue Life Insurance, Term Life, or Endowment plans. If asked about Life Insurance or company overview, state clearly that ${agentName} provides Non-Life insurance products only, and that Life Insurance is handled by a separate company named EFU Life.`;
+
         // FIX 3: Per-turn mandatory language & gender directive (prevents OpenAI Realtime from reverting to male verbs or wrong language)
         const langGenderMandate = isUrdu
-          ? `[STRICT LANGUAGE & GENDER MANDATE]: You MUST respond 100% in URDU. You are a FEMALE virtual assistant — use ONLY female Urdu verbs (e.g. "کر سکتی ہوں", "سمجھتی ہوں", "بتاتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs ("سکتا ہوں", "کرتا ہوں", "سمجھتا ہوں"). Do NOT use Hindi words.`
-          : `[STRICT LANGUAGE MANDATE]: The user is speaking ENGLISH. You MUST respond 100% in ENGLISH. Do NOT speak Urdu.`;
+          ? `[STRICT LANGUAGE & GENDER MANDATE]: You MUST respond 100% in URDU. You are a FEMALE virtual assistant — use ONLY female Urdu verbs (e.g. "کر سکتی ہوں", "سمجھتی ہوں", "بتاتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs ("سکتا ہوں", "کرتا ہوں", "سمجھتا ہوں"). Do NOT use Hindi words.\n${nonLifeMandate}`
+          : `[STRICT LANGUAGE MANDATE]: The user is speaking ENGLISH. You MUST respond 100% in ENGLISH. Do NOT speak Urdu.\n${nonLifeMandate}`;
 
         // FIX 2: Insurance keyword safety net — detect insurance-related terms in any language before refusing
         const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
