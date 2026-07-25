@@ -238,8 +238,8 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         chunkSize: body.chunkSize !== undefined ? Number(body.chunkSize) : 800,
         chunkOverlap: body.chunkOverlap !== undefined ? Number(body.chunkOverlap) : 100,
         fallbackMode: body.fallbackMode || 'topic_suggestion',
-        fallbackMessage: body.fallbackMessage || 'I can only answer questions about our services.',
-        fallbackMessageUrdu: body.fallbackMessageUrdu || 'میں صرف ہماری خدمات کے بارے میں سوالات کا جواب دے سکتا ہوں۔',
+        fallbackMessage: body.fallbackMessage ?? null,
+        fallbackMessageUrdu: body.fallbackMessageUrdu ?? null,
         maxTopicLinks: body.maxTopicLinks !== undefined ? Number(body.maxTopicLinks) : 5
       },
       update: {
@@ -249,8 +249,8 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         chunkSize: body.chunkSize !== undefined ? Number(body.chunkSize) : undefined,
         chunkOverlap: body.chunkOverlap !== undefined ? Number(body.chunkOverlap) : undefined,
         fallbackMode: body.fallbackMode || undefined,
-        fallbackMessage: body.fallbackMessage || undefined,
-        fallbackMessageUrdu: body.fallbackMessageUrdu || undefined,
+        fallbackMessage: body.fallbackMessage !== undefined ? body.fallbackMessage : undefined,
+        fallbackMessageUrdu: body.fallbackMessageUrdu !== undefined ? body.fallbackMessageUrdu : undefined,
         maxTopicLinks: body.maxTopicLinks !== undefined ? Number(body.maxTopicLinks) : undefined,
         updatedAt: new Date()
       }

@@ -108,20 +108,8 @@ export class KnowledgeTools {
           linksText = crawledPages.map((p: any) => p.title || p.url.replace(/^https?:\/\//, '')).join(', ');
         }
 
-        const isUrdu = /[\u0600-\u06FF]/.test(query);
-        const defaultUrdu = 'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔';
-        const defaultEnglish = 'I can only answer questions related to our services and official knowledge base. Here are some key pages you can explore:';
-
-        const fallbackIntro = isUrdu
-          ? (agent?.RetrievalConfig?.fallbackMessageUrdu || defaultUrdu)
-          : (agent?.RetrievalConfig?.fallbackMessage || defaultEnglish);
-
-        const speechText = linksText 
-          ? `${fallbackIntro} ${isUrdu ? 'جس میں شامل ہیں' : 'including'}: ${linksText}.`
-          : fallbackIntro;
-
         return {
-          resultText: `[CRITICAL OUT-OF-SCOPE REFUSAL] This query is completely out of scope of our knowledge base. You MUST refuse to answer general knowledge, coding, math, other companies, or random queries. You MUST respond exactly with this refusal text and do not add any general knowledge: "${speechText}"`,
+          resultText: `[NOTE FOR THIS TURN]: No knowledge base document matched this specific query. If the user is asking a follow-up or clarification about previously discussed company services, answer naturally using conversation history. If asking an unrelated non-company topic, politely explain that you can only assist with official company services.`,
           sources: []
         };
       }

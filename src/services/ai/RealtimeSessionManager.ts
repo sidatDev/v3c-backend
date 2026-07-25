@@ -3,6 +3,7 @@ import { TenantConfigCache, TenantConfig } from '../cache/TenantConfigCache';
 import { PromptService } from './PromptService';
 import { RetrievalService } from './RetrievalService';
 import { ConversationService } from './ConversationService';
+import { SecurityShieldService } from '../security/SecurityShieldService';
 import { StructuredLogger } from '../logger/StructuredLogger';
 import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
 import {
@@ -87,6 +88,7 @@ export class RealtimeSessionManager {
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
   private isResponseInProgress: boolean = false;
+  private lastTurnTimestamp: number = 0;
 
   private agentId?: string;
   private publicKey?: string;
@@ -422,6 +424,48 @@ export class RealtimeSessionManager {
         const detectedLanguage: 'English' | 'Urdu' | 'RomanUrdu' = dominantLang;
         const isUrdu = detectedLanguage === 'Urdu' || detectedLanguage === 'RomanUrdu';
 
+        // ── Security Layer 1: Anti-Bot Turn Cooldown Throttling ──────────────
+        const nowMs = Date.now();
+        if (this.lastTurnTimestamp > 0 && (nowMs - this.lastTurnTimestamp < 2500)) {
+          console.log(`[PIPELINE ${ts()}] ⏱ ANTI-BOT THROTTLE — ignored rapid turn (<2.5s gap)`);
+          return;
+        }
+        this.lastTurnTimestamp = nowMs;
+
+        // ── Security Layer 2: Session Turn Cap Check ────────────────────────
+        const turnCapCheck = SecurityShieldService.checkSessionTurnCap(this.turnCount, 25);
+        if (turnCapCheck.exceeded) {
+          console.log(`[PIPELINE ${ts()}] 🛑 SESSION TURN CAP REACHED (${this.turnCount}/25) — sending turn limit notice`);
+          const capNotice = isUrdu
+            ? 'آپ کے وائس سیشن کی گفتگو کی حد مکمل ہو چکی ہے۔ مزید معلومات کے لیے اپنا نمبر چھوڑ دیں۔'
+            : 'You have reached the session conversation limit. Please leave your contact details so our support team can follow up with you.';
+
+          this.sendResponseCreate({
+            type: 'response.create',
+            response: {
+              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${capNotice}"`,
+            },
+          });
+          return;
+        }
+
+        // ── Security Layer 3: Prompt Injection Shield ───────────────────────
+        const injectionMatch = SecurityShieldService.detectPromptInjection(userSpeech);
+        if (injectionMatch) {
+          console.log(`[PIPELINE ${ts()}] 🛡 PROMPT INJECTION SHIELD TRIGGERED: "${injectionMatch}" — refusing payload`);
+          const refusalMsg = isUrdu
+            ? 'معذرت، میں آپ کی اس درخواست کا جواب نہیں دے سکتا۔ میں صرف ہماری کمپنی کی سروسز میں مدد کر سکتا ہوں۔'
+            : 'I cannot fulfill requests attempting to alter system instructions. How can I assist you with our services today?';
+
+          this.sendResponseCreate({
+            type: 'response.create',
+            response: {
+              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${refusalMsg}"`,
+            },
+          });
+          return;
+        }
+
         // Save visitor turn to DB
         if (this.sessionIdNum && this.leadId) {
           await ConversationService.saveMessage({
@@ -478,13 +522,17 @@ export class RealtimeSessionManager {
           if (delayMs > 0) {
             await new Promise((r) => setTimeout(r, delayMs));
           }
+          // Per-turn language & gender mandate for greetings too
+          const greetingLangMandate = isUrdu
+            ? `[STRICT LANGUAGE & GENDER MANDATE]: Respond in URDU. You are a FEMALE assistant — use female verbs ("سمجھتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs. No Hindi words.`
+            : `[STRICT LANGUAGE MANDATE]: Respond in ENGLISH only.`;
 
           this.lastUserTurn = userSpeech;
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SYSTEM PROMPT PERSONA PATH]`);
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional enterprise support agent. If asked about our services or company overview, introduce our primary services clearly.`,
+              instructions: `${greetingLangMandate}\n[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional enterprise support agent. If asked about our services or company overview, introduce our primary services clearly.`,
             },
           });
           return;
@@ -549,10 +597,10 @@ export class RealtimeSessionManager {
 
         // ── Intent Path B: Grounded Vector Search (RAG) ─────────────────────
         const rawThreshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.35;
-        // Cap threshold to max 0.38 for voice inputs to prevent STT mishearings (e.g. "ASU" for "EFU") from being hard-blocked
-        const threshold = Math.min(rawThreshold, 0.38);
+        // FIX 1: Language-aware threshold — Urdu queries against English-indexed KB naturally score ~0.25-0.33
+        const threshold = isUrdu ? Math.min(rawThreshold, 0.25) : Math.min(rawThreshold, 0.38);
         const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
-        console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — query: "${searchQuery.substring(0, 80)}", threshold: ${threshold}`);
+        console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — query: "${searchQuery.substring(0, 80)}", threshold: ${threshold} (lang: ${detectedLanguage})`);
 
         const retrieval = await RetrievalService.search(
           this.tenantConfig.tenantId,
@@ -606,21 +654,46 @@ export class RealtimeSessionManager {
           await new Promise((r) => setTimeout(r, thinkingDelayMs));
         }
 
-        if (retrieval.fallbackTriggered) {
-          // ── Strict Out-of-Scope Fallback Refusal ──────────────────────────────────
-          const fallbackText = isUrdu
-            ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu ||
-              'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔'
-            : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage ||
-              'I can only answer questions related to our services and official knowledge base.';
+        const agentName = this.tenantConfig.agent.name?.trim() || 'EFU General Insurance';
 
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE FALLBACK REFUSAL]`);
-          this.sendResponseCreate({
-            type: 'response.create',
-            response: {
-              instructions: `You MUST respond with EXACTLY this text and nothing else, in ${detectedLanguage}: "${fallbackText}"`,
-            },
-          });
+        // FIX 3: Per-turn mandatory language & gender directive (prevents OpenAI Realtime from reverting to male verbs or wrong language)
+        const langGenderMandate = isUrdu
+          ? `[STRICT LANGUAGE & GENDER MANDATE]: You MUST respond 100% in URDU. You are a FEMALE virtual assistant — use ONLY female Urdu verbs (e.g. "کر سکتی ہوں", "سمجھتی ہوں", "بتاتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs ("سکتا ہوں", "کرتا ہوں", "سمجھتا ہوں"). Do NOT use Hindi words.`
+          : `[STRICT LANGUAGE MANDATE]: The user is speaking ENGLISH. You MUST respond 100% in ENGLISH. Do NOT speak Urdu.`;
+
+        // FIX 2: Insurance keyword safety net — detect insurance-related terms in any language before refusing
+        const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
+        const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(userSpeech);
+
+        if (retrieval.fallbackTriggered) {
+          // FIX 4: Improved follow-up detection — checks conversation history, word count, keywords, AND insurance terms
+          const isFollowUp = !!this.lastUserTurn && (
+            userSpeech.split(/\s+/).length < 7 || 
+            /\b(it|other|others|this|that|also|more|cost|price|details|besides|difference|compare|dono|doosri|doosra|elawa|alawa|aur|batao|konsa|konsi|mazeed|pehla|dosra|teesra|farq|muqabla|دوسرا|دوسری|علاوہ|اور|بتاؤ|مزید|پہلا|تیسرا|فرق|مقابلہ|درمیان|ڈیفرنس)\b/i.test(userSpeech)
+          );
+
+          if (isFollowUp || hasInsuranceKeyword) {
+            // Insurance-related query or follow-up — answer using conversation context, NOT strict refusal
+            const directive = hasInsuranceKeyword && !isFollowUp
+              ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agentName} insurance services but no exact knowledge base chunk matched. Answer the query naturally and helpfully in ${detectedLanguage} using your knowledge of ${agentName} products. If you don't have specific details, offer to connect them with official ${agentName} support channels.`
+              : `[TURN DIRECTIVE]: Answer the user's follow-up query naturally and accurately in ${detectedLanguage} using recent conversation history regarding ${agentName} services.`;
+
+            console.log(`[PIPELINE ${ts()}] → SENDING response.create() [${hasInsuranceKeyword ? 'INSURANCE KEYWORD SAFETY NET' : 'MULTI-TURN FOLLOW-UP'} DIRECTIVE]`);
+            this.sendResponseCreate({
+              type: 'response.create',
+              response: {
+                instructions: `${langGenderMandate}\n${directive}`,
+              },
+            });
+          } else {
+            console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE REFUSAL DIRECTIVE]`);
+            this.sendResponseCreate({
+              type: 'response.create',
+              response: {
+                instructions: `${langGenderMandate}\n[STRICT OUT-OF-SCOPE DIRECTIVE]: The user's query is NOT related to insurance. You MUST politely refuse in ${detectedLanguage}. State clearly that you are the AI assistant for ${agentName} and can only assist with ${agentName} insurance services. Under NO circumstances provide instructions, troubleshooting, or general knowledge for non-insurance topics.`,
+              },
+            });
+          }
         } else {
           // ── RAG — inject retrieved context TURN-SCOPED inside response.create (Token Optimized) ──────
           const contextOnly = retrieval.contextText;
@@ -631,7 +704,7 @@ export class RealtimeSessionManager {
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Act as an enterprise support agent and answer the user's question clearly, completely, and accurately in ${detectedLanguage} using this context. Do not truncate important details]:\n${contextOnly}`,
+              instructions: `${langGenderMandate}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer the user's question clearly and helpfully in ${detectedLanguage} using this official ${agentName} knowledge base context. STRICT RELEVANCE GUARD: If the query is general geography, country trivia, or non-insurance topics, ONLY explain relevant ${agentName} insurance products and politely state you can only assist with ${agentName} services]:\n${contextOnly}`,
             },
           });
         }

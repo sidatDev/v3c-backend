@@ -61,12 +61,7 @@ export class PromptService {
     // 2. Language & Gender Constraints
     promptParts.push(`### Language & Gender Rules:\n${langInstruction}\n\n${genderInstruction}`);
 
-    // 3. Business Persona (if configured, <300 tokens)
-    if (personaPrompt && personaPrompt.trim()) {
-      promptParts.push(`### Persona & Tone Guidelines:\n${capTokens(personaPrompt, 300)}`);
-    }
-
-    // 4. Guardrails & Fallback Protocol (~200 tokens)
+    // 3. Guardrails & Policy Protocol (~200 tokens)
     if (guardrailsPrompt && guardrailsPrompt.trim()) {
       promptParts.push(`### Safety, Guardrails & Policy Protocol:\n${capTokens(guardrailsPrompt, 200)}`);
     }
@@ -90,12 +85,12 @@ export class PromptService {
     if (retrievedContext && retrievedContext.trim()) {
       promptParts.push(`### CRITICAL RULE — EFU Knowledge Base Ground Context (STRICT GROUNDING):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
-        `1. Answer using ONLY the information from this knowledge base.\n` +
-        `2. Reproduce exact details and facts without making up policies or referencing non-EFU entities.\n` +
-        `3. If the user question cannot be answered from this knowledge base, output the designated fallback refusal.\n\n` +
+        `1. Answer using ONLY official EFU General Insurance information from this knowledge base.\n` +
+        `2. STRICT RELEVANCE GUARD: If the query is general geography, country trivia, or non-insurance topics (e.g. "Tell me about Pakistan"), ONLY explain relevant ${tenantName} insurance products (e.g. EFU Travel Insurance coverage for Pakistan) and politely state that you can only assist with ${tenantName} services.\n` +
+        `3. Reproduce exact details without making up policies or referencing non-EFU entities.\n\n` +
         `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
     } else {
-      promptParts.push(`### Knowledge Base Context:\nNo specific EFU reference knowledge found for this query. Strictly output designated fallback refusal.`);
+      promptParts.push(`### Knowledge Base Context:\nNo specific EFU reference knowledge found for this query.`);
     }
 
     return promptParts.join('\n\n').trim();
