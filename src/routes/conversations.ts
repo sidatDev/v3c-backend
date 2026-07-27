@@ -41,7 +41,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
             select: { id: true, name: true }
           },
           VisitorSession: {
-            select: { id: true, referrer: true, landingPage: true, startedAt: true, status: true }
+            select: { id: true, referrer: true, landingPage: true, startedAt: true, status: true, ipAddress: true }
           }
         }
       }),
@@ -118,6 +118,43 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
         conversation,
         transcript: transcriptMessages
       }
+    };
+  });
+
+  // @route   DELETE /api/conversations/:id
+  // @desc    Delete single conversation or entire session transcript
+  fastify.delete('/:id', { preHandler: [protect, restrictTo('conversations', 'view')] }, async (request, reply) => {
+    const tenantId = request.user!.tenantId;
+    const conversationId = parseInt((request.params as any).id);
+
+    if (isNaN(conversationId)) {
+      throw new AppError('Invalid Conversation ID', 400);
+    }
+
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: conversationId }
+    });
+
+    if (!conversation || (tenantId && conversation.tenantId !== tenantId)) {
+      throw new AppError('Conversation not found', 404);
+    }
+
+    if (conversation.visitorSessionId) {
+      await prisma.conversation.deleteMany({
+        where: {
+          visitorSessionId: conversation.visitorSessionId,
+          tenantId: conversation.tenantId
+        }
+      });
+    } else {
+      await prisma.conversation.delete({
+        where: { id: conversationId }
+      });
+    }
+
+    return {
+      status: 'success',
+      message: 'Conversation deleted successfully'
     };
   });
 }

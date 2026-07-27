@@ -782,6 +782,7 @@ model VisitorSession {
   browser                String?
   device                 String?
   country                String?
+  ipAddress              String?
   conversationSummary    String?
   conversationStatus     String?                  @default("open")
   tags                   String[]                 @default([])

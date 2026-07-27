@@ -314,6 +314,8 @@ ${snippets}`;
       }
     });
 
+    const clientIp = (request.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || request.ip || request.socket.remoteAddress || null;
+
     const session = await prisma.visitorSession.create({
       data: {
         secureId: `sess-${randomUUID()}`,
@@ -323,6 +325,7 @@ ${snippets}`;
         aiAgentId: agent.id,
         referrer: referrer || null,
         landingPage: landingPage || null,
+        ipAddress: clientIp,
         startedAt: new Date(),
         updatedAt: new Date()
       }
