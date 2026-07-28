@@ -24,6 +24,7 @@ import agentsRoutes from './routes/agents';
 import inboxRoutes from './routes/inbox';
 import aiLogsRoutes from './routes/ai-logs';
 import analyticsRoutes from './routes/analytics';
+import superAdminRoutes from './routes/super-admin';
 import publicRoutes from './routes/public';
 import { errorHandler } from './middleware/error';
 import { auditLoggerHook } from './middleware/audit';
@@ -96,6 +97,7 @@ app.register(agentsRoutes, { prefix: '/api/agents' });
 app.register(inboxRoutes, { prefix: '/api/inbox' });
 app.register(aiLogsRoutes, { prefix: '/api/ai-logs' });
 app.register(analyticsRoutes, { prefix: '/api/analytics' });
+app.register(superAdminRoutes, { prefix: '/api/super-admin' });
 app.register(publicRoutes, { prefix: '/api/public' });
 
 // Health Check
