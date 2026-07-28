@@ -80,6 +80,8 @@ app.register(websocket);
 // 3. Register Global Audit Logger Hook
 app.addHook('onResponse', auditLoggerHook);
 
+import billingRoutes from './routes/billing';
+
 // 4. Register API Route Plugins
 app.register(authRoutes, { prefix: '/api/auth' });
 app.register(rolesRoutes, { prefix: '/api/roles' });
@@ -97,6 +99,7 @@ app.register(agentsRoutes, { prefix: '/api/agents' });
 app.register(inboxRoutes, { prefix: '/api/inbox' });
 app.register(aiLogsRoutes, { prefix: '/api/ai-logs' });
 app.register(analyticsRoutes, { prefix: '/api/analytics' });
+app.register(billingRoutes, { prefix: '/api/billing' });
 app.register(superAdminRoutes, { prefix: '/api/super-admin' });
 app.register(publicRoutes, { prefix: '/api/public' });
 

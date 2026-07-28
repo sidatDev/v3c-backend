@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import prisma from '../../lib/prisma';
 import { TenantConfigCache, TenantConfig } from '../cache/TenantConfigCache';
 import { PromptService } from './PromptService';
 import { RetrievalService } from './RetrievalService';
@@ -6,6 +7,7 @@ import { ConversationService } from './ConversationService';
 import { SecurityShieldService } from '../security/SecurityShieldService';
 import { StructuredLogger } from '../logger/StructuredLogger';
 import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
+import { AiLogService } from '../logger/AiLogService';
 import {
   isNoisyTranscript,
   normalizeHindiToUrdu,
@@ -162,6 +164,15 @@ export class RealtimeSessionManager {
       const sessionCtx = await ConversationService.getSessionContext(this.sessionIdNum, tenantId);
       this.dbSession = sessionCtx.dbSession;
       this.leadId = sessionCtx.leadId;
+
+      try {
+        await prisma.visitorSession.update({
+          where: { id: this.sessionIdNum },
+          data: { channel: 'voice' }
+        });
+      } catch (err: any) {
+        StructuredLogger.warn('[RealtimeSessionManager] Failed to update session channel to voice', { error: err?.message });
+      }
     }
 
     // ── 3. Build lean base system prompt (NO static KB — RAG injects per-turn) ─
@@ -346,10 +357,40 @@ export class RealtimeSessionManager {
         if (this.pendingTurnAudit) {
           this.pendingTurnAudit.latencyMs = Date.now() - this.turnStartTime;
           const usage = event.response?.usage;
+          const promptTokens = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+          const completionTokens = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
           if (usage) {
-            this.pendingTurnAudit.totalTokens = usage.total_tokens ?? undefined;
+            this.pendingTurnAudit.totalTokens = usage.total_tokens ?? (promptTokens + completionTokens);
           }
           VoiceAuditLogger.printFinal(this.pendingTurnAudit);
+
+          if (this.tenantConfig) {
+            AiLogService.logRequest({
+              tenantId: this.tenantConfig.tenantId,
+              agentId: this.tenantConfig.agent.id,
+              visitorSessionId: this.sessionIdNum || undefined,
+              mode: 'voice',
+              userQuery: this.lastUserTurn || 'Realtime Voice Turn',
+              modelUsed: 'gpt-realtime-mini',
+              voiceUsed: this.selectedVoice,
+              promptTokens,
+              completionTokens,
+              latencyMs: this.pendingTurnAudit.latencyMs
+            });
+          }
+
+          if (this.sessionIdNum) {
+            const voiceCost = (promptTokens * 0.01 + completionTokens * 0.02) / 1000;
+            prisma.visitorSession.update({
+              where: { id: this.sessionIdNum },
+              data: {
+                totalInputTokens: { increment: promptTokens },
+                totalOutputTokens: { increment: completionTokens },
+                estimatedCost: { increment: voiceCost }
+              }
+            }).catch(err => console.error('[RealtimeSessionManager] Failed to update VisitorSession token counts:', err));
+          }
+
           this.pendingTurnAudit = null;
         }
       }

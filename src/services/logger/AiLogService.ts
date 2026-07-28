@@ -25,15 +25,23 @@ export interface LogAiRequestParams {
 
 export class AiLogService {
   /**
-   * Persist AI request telemetry to DB for Observability & Audit
+   * Persist AI request telemetry to DB for Observability & Audit with precise model pricing
    */
   static async logRequest(params: LogAiRequestParams): Promise<void> {
     try {
       const promptTokens = params.promptTokens || 0;
       const completionTokens = params.completionTokens || 0;
-      
-      // Approximate pricing per 1K tokens ($0.00015 input, $0.0006 output for gpt-4o-mini)
-      const estimatedCost = (promptTokens * 0.00015 + completionTokens * 0.0006) / 1000;
+      const mode = params.mode || 'chat';
+      const model = params.modelUsed || 'gpt-4o-mini';
+
+      let estimatedCost = 0;
+      if (mode === 'voice' || model.includes('realtime')) {
+        // OpenAI Realtime Voice pricing ($10.00 / 1M input tokens, $20.00 / 1M output tokens -> $0.01 / 1K, $0.02 / 1K)
+        estimatedCost = (promptTokens * 0.01 + completionTokens * 0.02) / 1000;
+      } else {
+        // gpt-4o-mini text chat pricing ($0.15 / 1M input tokens, $0.60 / 1M output tokens -> $0.00015 / 1K, $0.0006 / 1K)
+        estimatedCost = (promptTokens * 0.00015 + completionTokens * 0.0006) / 1000;
+      }
 
       await prisma.aiLog.create({
         data: {
@@ -42,13 +50,13 @@ export class AiLogService {
           agentId: params.agentId || null,
           visitorSessionId: params.visitorSessionId || null,
           requestId: `req-${randomUUID()}`,
-          mode: params.mode || 'chat',
+          mode,
           languageDetected: params.languageDetected || 'en',
           userQuery: params.userQuery || null,
           retrievedChunkCount: params.retrievedChunkCount || 0,
           avgSimilarityScore: params.avgSimilarityScore || null,
           sourcesUsed: params.sourcesUsed || [],
-          modelUsed: params.modelUsed || 'gpt-4o-mini',
+          modelUsed: model,
           voiceUsed: params.voiceUsed || null,
           promptTokens,
           completionTokens,
