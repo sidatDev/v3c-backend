@@ -12,9 +12,13 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
     const query = (request.query as any) || {};
     const { period, startDate, endDate, tenantId: overrideTenantId } = query;
 
-    // Super admin override
-    if (request.user?.role === 'super_admin' && overrideTenantId && overrideTenantId !== 'all') {
-      tenantId = overrideTenantId;
+    // Super admin handling: if no override or 'all', query across all tenants
+    if (request.user?.role === 'super_admin') {
+      if (!overrideTenantId || overrideTenantId === 'all') {
+        tenantId = undefined;
+      } else {
+        tenantId = overrideTenantId;
+      }
     }
 
     if (!tenantId && request.user?.role !== 'super_admin') {
@@ -43,7 +47,7 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
       sessionWhere.createdAt = dateFilter;
     }
 
-    const [tenant, tenantLimit, subscription, sessionStats, voiceLogStats, chatLogStats, voiceSessionStats] = await Promise.all([
+    const [tenant, tenantLimit, subscription, sessionStats, voiceLogStats, chatLogStats, voiceSessionStats, tenantsList] = await Promise.all([
       tenantId ? prisma.tenant.findUnique({ where: { id: tenantId } }) : null,
       tenantId ? prisma.tenantLimit.findUnique({ where: { tenantId } }) : null,
       tenantId ? prisma.subscription.findFirst({ where: { tenantId }, orderBy: { createdAt: 'desc' } }) : null,
@@ -65,7 +69,8 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
         where: { ...sessionWhere, channel: 'voice' },
         _count: { id: true },
         _sum: { totalInputTokens: true, totalOutputTokens: true, estimatedCost: true }
-      })
+      }),
+      request.user?.role === 'super_admin' ? prisma.tenant.findMany({ select: { id: true, name: true, slug: true } }) : Promise.resolve([])
     ]);
 
     const sessionCount = sessionStats._count.id || 0;
@@ -96,6 +101,7 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
       status: 'success',
       data: {
         tenant: tenant ? { id: tenant.id, name: tenant.name, slug: tenant.slug } : null,
+        tenantsList,
         plan: {
           name: subscription?.status || 'Enterprise Tier',
           status: tenant?.status || 'active',
