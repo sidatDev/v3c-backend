@@ -77,16 +77,22 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
     let resetTitle = false;
 
     if (isMultipart) {
+      const pendingUploads: Promise<void>[] = [];
       const parts = request.parts();
       for await (const part of parts) {
         if (part.type === 'file') {
           const buffer = await part.toBuffer();
           const ext = part.filename.split('.').pop() || 'png';
-          const fileKey = `branding/${tenantId || 'global'}/${part.fieldname}-${randomUUID()}.${ext}`;
-          const s3Url = await uploadFileToS3(buffer, fileKey, part.mimetype);
+          const fieldname = part.fieldname;
+          const mimetype = part.mimetype;
+          const fileKey = `branding/${tenantId || 'global'}/${fieldname}-${randomUUID()}.${ext}`;
 
-          if (part.fieldname === 'logo') logoUrl = s3Url;
-          if (part.fieldname === 'favicon') faviconUrl = s3Url;
+          pendingUploads.push(
+            uploadFileToS3(buffer, fileKey, mimetype).then(s3Url => {
+              if (fieldname === 'logo') logoUrl = s3Url;
+              if (fieldname === 'favicon') faviconUrl = s3Url;
+            })
+          );
         } else {
           if (part.fieldname === 'companyName') companyName = part.value as string;
           if (part.fieldname === 'pageTitle') pageTitle = part.value as string;
@@ -97,6 +103,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
           if (part.fieldname === 'resetTitle') resetTitle = part.value === 'true';
         }
       }
+      await Promise.all(pendingUploads);
     } else {
       const body = request.body as any;
       companyName = body.companyName;

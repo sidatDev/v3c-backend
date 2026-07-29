@@ -28,7 +28,7 @@ export const uploadFileToS3 = async (
   const currentBucket = getBucketName();
   const client = getS3Client();
 
-  try {
+  const uploadPromise = (async () => {
     await client.send(
       new PutObjectCommand({
         Bucket: currentBucket,
@@ -38,6 +38,14 @@ export const uploadFileToS3 = async (
       })
     );
     return `${currentEndpoint}/${currentBucket}/${fileKey}`;
+  })();
+
+  const timeoutPromise = new Promise<string>((_, reject) =>
+    setTimeout(() => reject(new Error('S3 upload operation timed out after 4000ms')), 4000)
+  );
+
+  try {
+    return await Promise.race([uploadPromise, timeoutPromise]);
   } catch (err: any) {
     console.warn(`[S3 Upload Warning] S3 upload failed for ${fileKey}. Using resilient Data URL fallback:`, err?.message || err);
     const mime = contentType || 'image/png';
