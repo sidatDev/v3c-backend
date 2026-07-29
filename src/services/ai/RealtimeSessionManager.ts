@@ -316,8 +316,9 @@ export class RealtimeSessionManager {
 
     // ── Proxy audio from browser → OpenAI ────────────────────────────────────
     this.socket.on('message', (message: WebSocket.RawData) => {
+      const textMessage = typeof message === 'string' ? message : message.toString('utf-8');
       try {
-        const msg = JSON.parse(message.toString());
+        const msg = JSON.parse(textMessage);
         if (msg.type === 'ping') {
           this.socket.send(JSON.stringify({ type: 'pong' }));
           return;
@@ -325,7 +326,7 @@ export class RealtimeSessionManager {
       } catch (_) {}
 
       if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-        this.openAiWs.send(message);
+        this.openAiWs.send(textMessage);
       }
     });
 
