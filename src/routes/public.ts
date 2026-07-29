@@ -6,6 +6,7 @@ import { AppError } from '../middleware/error';
 import { openai, generateEmbedding } from '../utils/openai';
 import { ChatService } from '../services/ai/ChatService';
 import { VoiceService } from '../services/ai/VoiceService';
+import { SecurityShieldService } from '../services/security/SecurityShieldService';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -366,7 +367,7 @@ ${snippets}`;
       throw new AppError('Message content cannot be empty', 400);
     }
 
-    const result = await ChatService.handleChat({
+    const result = await ChatService.processMessage({
       sessionId: sessionId ? Number(sessionId) : undefined,
       agentId,
       publicKey,
@@ -529,6 +530,26 @@ Return ONLY a valid JSON array of strings, for example:
     return {
       status: 'success',
       data: { message: 'Session ended' }
+    };
+  });
+
+  // @route   POST /api/public/verify-turnstile
+  // @desc    Validate Cloudflare Turnstile token to prevent bot abuse
+  fastify.post('/verify-turnstile', async (request, reply) => {
+    const { token } = (request.body as any) || {};
+    const clientIp = (request.headers['cf-connecting-ip'] as string) ||
+                     (request.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+                     request.ip;
+
+    const outcome = await SecurityShieldService.verifyTurnstileToken(token || '', clientIp);
+
+    if (!outcome.success) {
+      throw new AppError(outcome.reason || 'Bot protection check failed', 400);
+    }
+
+    return {
+      status: 'success',
+      data: { verified: true }
     };
   });
 

@@ -40,18 +40,25 @@ export default async function accountRoutes(fastify: FastifyInstance, options: F
     let imageUrl: string | undefined;
 
     if (isMultipart) {
+      const pendingUploads: Promise<void>[] = [];
       const parts = request.parts();
       for await (const part of parts) {
         if (part.type === 'file') {
           const buffer = await part.toBuffer();
           const ext = part.filename.split('.').pop() || 'png';
           const fileKey = `avatars/user-${userId}-${randomUUID()}.${ext}`;
-          imageUrl = await uploadFileToS3(buffer, fileKey, part.mimetype);
+          const mimetype = part.mimetype;
+          pendingUploads.push(
+            uploadFileToS3(buffer, fileKey, mimetype).then(url => {
+              imageUrl = url;
+            })
+          );
         } else {
           if (part.fieldname === 'name') name = part.value as string;
           if (part.fieldname === 'phone') phone = part.value as string;
         }
       }
+      await Promise.all(pendingUploads);
     } else {
       const body = request.body as any;
       name = body.name;
