@@ -39,11 +39,15 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
       if (c.value) branding[c.key] = c.value;
     });
 
+    const companyName = branding.brand_company_name || 'V3C Platform';
+    const pageTitle = branding.brand_page_title || `${companyName}'s Workspace`;
+
     return {
       status: 'success',
       data: {
         branding: {
-          companyName: branding.brand_company_name || 'V3C Platform',
+          companyName,
+          pageTitle,
           logoUrl: branding.brand_logo_url || null,
           faviconUrl: branding.brand_favicon_url || null,
           accentColor: branding.brand_accent_color || '#4F46E5'
@@ -54,7 +58,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   });
 
   // @route   PUT /api/domain/branding
-  // @desc    Update tenant branding (Company Name, Accent Color, SeaweedFS Logo/Favicon Upload)
+  // @desc    Update tenant branding (Company Name, Page Title, Accent Color, SeaweedFS Logo/Favicon Upload & Delete)
   fastify.put('/branding', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
     const isSuperAdmin = request.user!.role === 'super_admin';
@@ -63,10 +67,14 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
     const isMultipart = request.isMultipart();
 
     let companyName: string | undefined;
+    let pageTitle: string | undefined;
     let accentColor: string | undefined;
     let logoUrl: string | undefined;
     let faviconUrl: string | undefined;
     let targetDomainId: string | number | undefined;
+    let deleteLogo = false;
+    let deleteFavicon = false;
+    let resetTitle = false;
 
     if (isMultipart) {
       const parts = request.parts();
@@ -81,15 +89,23 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
           if (part.fieldname === 'favicon') faviconUrl = s3Url;
         } else {
           if (part.fieldname === 'companyName') companyName = part.value as string;
+          if (part.fieldname === 'pageTitle') pageTitle = part.value as string;
           if (part.fieldname === 'accentColor') accentColor = part.value as string;
           if (part.fieldname === 'domainId') targetDomainId = part.value as string;
+          if (part.fieldname === 'deleteLogo') deleteLogo = part.value === 'true';
+          if (part.fieldname === 'deleteFavicon') deleteFavicon = part.value === 'true';
+          if (part.fieldname === 'resetTitle') resetTitle = part.value === 'true';
         }
       }
     } else {
       const body = request.body as any;
       companyName = body.companyName;
+      pageTitle = body.pageTitle;
       accentColor = body.accentColor;
       targetDomainId = body.domainId;
+      deleteLogo = !!body.deleteLogo;
+      deleteFavicon = !!body.deleteFavicon;
+      resetTitle = !!body.resetTitle;
     }
 
     let effectiveTenantId = tenantId;
@@ -104,8 +120,13 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
       throw new AppError('Tenant ID missing', 400);
     }
 
+    if (deleteLogo) logoUrl = '';
+    if (deleteFavicon) faviconUrl = '';
+    if (resetTitle) pageTitle = '';
+
     const updates = [
       { key: 'brand_company_name', val: companyName },
+      { key: 'brand_page_title', val: pageTitle },
       { key: 'brand_accent_color', val: accentColor },
       { key: 'brand_logo_url', val: logoUrl },
       { key: 'brand_favicon_url', val: faviconUrl }

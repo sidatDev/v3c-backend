@@ -241,8 +241,12 @@ ${snippets}`;
       if (c.value) brandingMap[c.key] = c.value;
     });
 
+    const companyName = brandingMap.brand_company_name || tenant?.name || 'V3C Platform';
+    const pageTitle = brandingMap.brand_page_title || `${companyName}'s Workspace`;
+
     const branding = {
-      companyName: brandingMap.brand_company_name || tenant?.name || 'V3C Platform',
+      companyName,
+      pageTitle,
       logoUrl: brandingMap.brand_logo_url || null,
       faviconUrl: brandingMap.brand_favicon_url || null,
       accentColor: brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
