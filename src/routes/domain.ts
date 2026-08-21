@@ -50,7 +50,17 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
           pageTitle,
           logoUrl: branding.brand_logo_url || null,
           faviconUrl: branding.brand_favicon_url || null,
-          accentColor: branding.brand_accent_color || '#4F46E5'
+          accentColor: branding.theme_accent_color || branding.brand_accent_color || '#4F46E5'
+        },
+        theme: {
+          primaryColor: branding.theme_primary_color || '#4f46e5',
+          sidebarColor: branding.theme_sidebar_color || '#FFFFFF',
+          sidebarActiveColor: branding.theme_sidebar_active_color || '#4f46e5',
+          sidebarActiveTextColor: branding.theme_sidebar_active_text_color || '#FFFFFF',
+          accentColor: branding.theme_accent_color || branding.brand_accent_color || '#f59e0b',
+          textColor: branding.theme_text_color || '#0f172a',
+          textHoverColor: branding.theme_text_hover_color || '#4f46e5',
+          borderRadius: branding.theme_border_radius || '0.625rem'
         },
         websites
       }
@@ -243,4 +253,120 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
     await prisma.domain.delete({ where: { id } });
     return { status: 'success', message: 'Domain deleted successfully.' };
   });
+
+  // @route   GET /api/domain/theme
+  // @desc    Get tenant theme customization
+  fastify.get('/theme', { preHandler: [protect] }, async (request, reply) => {
+    const tenantId = request.user!.tenantId || null;
+
+    const configs = await prisma.configuration.findMany({
+      where: tenantId
+        ? { OR: [{ tenantId }, { tenantId: null }] }
+        : { tenantId: null }
+    });
+
+    const map: Record<string, string> = {};
+    // Load global configs first
+    configs.forEach((c) => {
+      if (c.tenantId === null && c.value) map[c.key] = c.value;
+    });
+    // Override with tenant configs
+    configs.forEach((c) => {
+      if (c.tenantId && c.value) map[c.key] = c.value;
+    });
+
+    return {
+      status: 'success',
+      data: {
+        primaryColor: map.theme_primary_color || '#4f46e5',
+        sidebarColor: map.theme_sidebar_color || '#FFFFFF',
+        sidebarActiveColor: map.theme_sidebar_active_color || '#4f46e5',
+        sidebarActiveTextColor: map.theme_sidebar_active_text_color || '#FFFFFF',
+        accentColor: map.theme_accent_color || map.brand_accent_color || '#f59e0b',
+        textColor: map.theme_text_color || '#0f172a',
+        textHoverColor: map.theme_text_hover_color || '#4f46e5',
+        borderRadius: map.theme_border_radius || '0.625rem'
+      }
+    };
+  });
+
+  // @route   PUT /api/domain/theme
+  // @desc    Update tenant theme customization
+  fastify.put('/theme', { preHandler: [protect] }, async (request, reply) => {
+    const tenantId = request.user!.tenantId || null;
+    const isSuperAdmin = request.user!.role === 'super_admin';
+    if (!tenantId && !isSuperAdmin) throw new AppError('Tenant ID missing', 400);
+
+    const {
+      primaryColor,
+      sidebarColor,
+      sidebarActiveColor,
+      sidebarActiveTextColor,
+      accentColor,
+      textColor,
+      textHoverColor,
+      borderRadius,
+    } = request.body as {
+      primaryColor?: string;
+      sidebarColor?: string;
+      sidebarActiveColor?: string;
+      sidebarActiveTextColor?: string;
+      accentColor?: string;
+      textColor?: string;
+      textHoverColor?: string;
+      borderRadius?: string;
+    };
+
+    const updates = [
+      { key: 'theme_primary_color', val: primaryColor },
+      { key: 'theme_sidebar_color', val: sidebarColor },
+      { key: 'theme_sidebar_active_color', val: sidebarActiveColor },
+      { key: 'theme_sidebar_active_text_color', val: sidebarActiveTextColor },
+      { key: 'theme_accent_color', val: accentColor },
+      { key: 'brand_accent_color', val: accentColor },
+      { key: 'theme_text_color', val: textColor },
+      { key: 'theme_text_hover_color', val: textHoverColor },
+      { key: 'theme_border_radius', val: borderRadius }
+    ];
+
+    for (const item of updates) {
+      if (item.val !== undefined && item.val !== null) {
+        const existingConfig = await prisma.configuration.findFirst({
+          where: { key: item.key, tenantId: tenantId }
+        });
+
+        if (existingConfig) {
+          await prisma.configuration.update({
+            where: { id: existingConfig.id },
+            data: { value: item.val, updatedAt: new Date() }
+          });
+        } else {
+          await prisma.configuration.create({
+            data: {
+              key: item.key,
+              value: item.val,
+              tenantId: tenantId,
+              updatedAt: new Date()
+            }
+          });
+        }
+      }
+    }
+
+    return {
+      status: 'success',
+      message: 'Theme saved successfully',
+      data: {
+        primaryColor: primaryColor || '#4f46e5',
+        sidebarColor: sidebarColor || '#FFFFFF',
+        sidebarActiveColor: sidebarActiveColor || '#4f46e5',
+        sidebarActiveTextColor: sidebarActiveTextColor || '#FFFFFF',
+        accentColor: accentColor || '#f59e0b',
+        textColor: textColor || '#0f172a',
+        textHoverColor: textHoverColor || '#4f46e5',
+        borderRadius: borderRadius || '0.625rem'
+      }
+    };
+  });
 }
+

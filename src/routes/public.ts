@@ -236,10 +236,18 @@ ${snippets}`;
     // Check if domain/widget is active
     const isActive = widgetConfig?.isActive ?? true;
 
-    const configs = tenantId ? await prisma.configuration.findMany({ where: { tenantId } }) : [];
+    const configs = tenantId
+      ? await prisma.configuration.findMany({ where: { OR: [{ tenantId }, { tenantId: null }] } })
+      : await prisma.configuration.findMany({ where: { tenantId: null } });
+
     const brandingMap: Record<string, string> = {};
+    // Load global fallback configs first
     configs.forEach(c => {
-      if (c.value) brandingMap[c.key] = c.value;
+      if (c.tenantId === null && c.value) brandingMap[c.key] = c.value;
+    });
+    // Override with tenant-specific configs
+    configs.forEach(c => {
+      if (c.tenantId && c.value) brandingMap[c.key] = c.value;
     });
 
     const companyName = brandingMap.brand_company_name || tenant?.name || 'V3C Platform';
@@ -250,7 +258,18 @@ ${snippets}`;
       pageTitle,
       logoUrl: brandingMap.brand_logo_url || null,
       faviconUrl: brandingMap.brand_favicon_url || null,
-      accentColor: brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+    };
+
+    const theme = {
+      primaryColor: brandingMap.theme_primary_color || '#4f46e5',
+      sidebarColor: brandingMap.theme_sidebar_color || '#FFFFFF',
+      sidebarActiveColor: brandingMap.theme_sidebar_active_color || '#4f46e5',
+      sidebarActiveTextColor: brandingMap.theme_sidebar_active_text_color || '#FFFFFF',
+      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#f59e0b',
+      textColor: brandingMap.theme_text_color || '#0f172a',
+      textHoverColor: brandingMap.theme_text_hover_color || '#4f46e5',
+      borderRadius: brandingMap.theme_border_radius || '0.625rem'
     };
 
     return {
@@ -262,6 +281,7 @@ ${snippets}`;
           slug: tenant?.slug
         },
         branding,
+        theme,
         agent: {
           id: agent.id,
           name: agent.name,
