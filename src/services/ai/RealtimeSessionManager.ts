@@ -88,6 +88,7 @@ export class RealtimeSessionManager {
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
   private isResponseInProgress: boolean = false;
+  private isTurnCapReached: boolean = false;
   private lastTurnTimestamp: number = 0;
 
   private agentId?: string;
@@ -352,6 +353,17 @@ export class RealtimeSessionManager {
           VoiceAuditLogger.printFinal(this.pendingTurnAudit);
           this.pendingTurnAudit = null;
         }
+
+        // Auto-terminate and emit session.limit_reached to client after limit notice audio completes
+        if (this.isTurnCapReached) {
+          console.log(`[SESSION LIFECYCLE] Limit audio notice finished — sending session.limit_reached & closing socket`);
+          if (this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({ type: 'session.limit_reached', reason: 'turn_cap_exceeded' }));
+            setTimeout(() => {
+              try { this.socket.close(); } catch (_) {}
+            }, 1000);
+          }
+        }
       }
 
       // ── CORE: Backend-authoritative RAG & Intent orchestration ─────────────
@@ -436,6 +448,7 @@ export class RealtimeSessionManager {
         const turnCapCheck = SecurityShieldService.checkSessionTurnCap(this.turnCount, 25);
         if (turnCapCheck.exceeded) {
           console.log(`[PIPELINE ${ts()}] 🛑 SESSION TURN CAP REACHED (${this.turnCount}/25) — sending turn limit notice`);
+          this.isTurnCapReached = true;
           const capNotice = isUrdu
             ? 'آپ کے وائس سیشن کی گفتگو کی حد مکمل ہو چکی ہے۔ مزید معلومات کے لیے اپنا نمبر چھوڑ دیں۔'
             : 'You have reached the session conversation limit. Please leave your contact details so our support team can follow up with you.';
