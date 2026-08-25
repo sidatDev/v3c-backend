@@ -9,15 +9,33 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/ai-logs
   // @desc    Get paginated AI logs for AI Observability & Audit
   fastify.get('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      return formatPaginatedResponse([], 0, { page: 1, limit: 10 });
-    }
-
+    const user = request.user!;
     const query = request.query as any;
     const { page, limit, skip, sortBy, sortOrder } = parsePagination(request, 'createdAt', 'desc');
 
-    const whereCondition: any = { tenantId };
+    const whereCondition: any = {};
+
+    if (user.role === 'super_admin') {
+      if (query.tenantId && query.tenantId !== 'all') {
+        whereCondition.tenantId = query.tenantId;
+      }
+    } else {
+      whereCondition.tenantId = user.tenantId;
+    }
+
+    if (query.startDate || query.endDate) {
+      whereCondition.createdAt = {};
+      if (query.startDate) whereCondition.createdAt.gte = new Date(query.startDate);
+      if (query.endDate) whereCondition.createdAt.lte = new Date(query.endDate);
+    } else if (query.period && query.period !== 'all') {
+      let days = 30;
+      if (query.period === '24h') days = 1;
+      else if (query.period === '3d') days = 3;
+      else if (query.period === '7d') days = 7;
+      else if (query.period === '30d') days = 30;
+
+      whereCondition.createdAt = { gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
+    }
 
     if (query.mode) {
       whereCondition.mode = query.mode;
@@ -59,11 +77,16 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/ai-logs/:id
   // @desc    Get detailed AI log telemetry record
   fastify.get('/:id', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id } = request.params as { id: string };
 
+    const where: any = { id };
+    if (user.role !== 'super_admin') {
+      where.tenantId = user.tenantId;
+    }
+
     const log = await prisma.aiLog.findFirst({
-      where: { id, tenantId: tenantId || undefined },
+      where,
       include: {
         VisitorSession: true
       }

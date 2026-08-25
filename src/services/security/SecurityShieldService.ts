@@ -10,6 +10,9 @@ const INJECTION_PATTERNS: RegExp[] = [
   /\bshow\s+me\s+your\s+(system|source)\s+(prompt|code)\b/i,
 ];
 
+// In-memory active voice sessions per IP address for concurrent call throttling
+const activeVoiceSessionsByIp = new Map<string, Set<any>>();
+
 export class SecurityShieldService {
   /**
    * Scan text for prompt injection / jailbreak patterns
@@ -99,20 +102,161 @@ export class SecurityShieldService {
   }
 
   /**
-   * Check if a visitor session has exceeded maximum turn limit
+   * Check if a visitor session has reached turn limits or 70% early warning threshold.
+   * Voice Cap = 20 Turns (70% = Turn 14).
+   * Chat Cap = 25 Turns (70% = Turn 18).
    */
-  static checkSessionTurnCap(currentTurnCount: number, maxTurns: number = 25): { exceeded: boolean; remaining: number } {
-    const exceeded = currentTurnCount > maxTurns;
+  static checkSessionTurnCap(
+    currentTurnCount: number,
+    mode: 'voice' | 'chat' = 'voice'
+  ): {
+    exceeded: boolean;
+    warning70Percent: boolean;
+    remaining: number;
+    currentTurnCount: number;
+    maxTurns: number;
+  } {
+    const maxTurns = mode === 'voice' ? 20 : 25;
+    const warningTurnThreshold = Math.ceil(maxTurns * 0.7); // Turn 14 for Voice, Turn 18 for Chat
+
+    const exceeded = currentTurnCount >= maxTurns;
+    const warning70Percent = currentTurnCount === warningTurnThreshold;
     const remaining = Math.max(0, maxTurns - currentTurnCount);
 
     if (exceeded) {
       StructuredLogger.info('[SecurityShield] Session turn cap exceeded', {
+        mode,
         currentTurnCount,
         maxTurns
       });
+    } else if (warning70Percent) {
+      StructuredLogger.info('[SecurityShield] Session 70% turn cap warning triggered', {
+        mode,
+        currentTurnCount,
+        maxTurns,
+        warningTurnThreshold
+      });
     }
 
-    return { exceeded, remaining };
+    return {
+      exceeded,
+      warning70Percent,
+      remaining,
+      currentTurnCount,
+      maxTurns
+    };
+  }
+
+  /**
+   * Check & register concurrent voice call limits per IP address (Max 3 active calls/IP)
+   */
+  static checkIpConcurrentCallCap(
+    ipAddress: string,
+    maxCalls: number = 3
+  ): { allowed: boolean; currentCalls: number; reason?: string } {
+    const cleanIp = ipAddress?.replace(/^::ffff:/, '').trim() || '127.0.0.1';
+    const activeSet = activeVoiceSessionsByIp.get(cleanIp);
+    const currentCalls = activeSet ? activeSet.size : 0;
+
+    if (currentCalls >= maxCalls) {
+      StructuredLogger.warn('[SecurityShield] Concurrent voice call limit exceeded per IP', {
+        cleanIp,
+        currentCalls,
+        maxCalls
+      });
+      return {
+        allowed: false,
+        currentCalls,
+        reason: `Maximum concurrent active voice calls reached for your IP address (${maxCalls} calls max). Please close an active call session to continue.`
+      };
+    }
+
+    return { allowed: true, currentCalls };
+  }
+
+  /**
+   * Register active voice WebSocket connection for an IP address
+   */
+  static registerVoiceCallSession(ipAddress: string, sessionInstance: any): void {
+    const cleanIp = ipAddress?.replace(/^::ffff:/, '').trim() || '127.0.0.1';
+    if (!activeVoiceSessionsByIp.has(cleanIp)) {
+      activeVoiceSessionsByIp.set(cleanIp, new Set());
+    }
+    activeVoiceSessionsByIp.get(cleanIp)!.add(sessionInstance);
+    StructuredLogger.info('[SecurityShield] Active voice call registered for IP', {
+      cleanIp,
+      totalActiveForIp: activeVoiceSessionsByIp.get(cleanIp)!.size
+    });
+  }
+
+  /**
+   * Unregister active voice WebSocket connection for an IP address
+   */
+  static unregisterVoiceCallSession(ipAddress: string, sessionInstance: any): void {
+    const cleanIp = ipAddress?.replace(/^::ffff:/, '').trim() || '127.0.0.1';
+    const activeSet = activeVoiceSessionsByIp.get(cleanIp);
+    if (activeSet) {
+      activeSet.delete(sessionInstance);
+      if (activeSet.size === 0) {
+        activeVoiceSessionsByIp.delete(cleanIp);
+      }
+    }
+    StructuredLogger.info('[SecurityShield] Voice call session unregistered for IP', {
+      cleanIp,
+      totalActiveForIp: activeVoiceSessionsByIp.get(cleanIp)?.size || 0
+    });
+  }
+
+  /**
+   * Verify Cloudflare Turnstile token
+   */
+  static async verifyTurnstileToken(
+    token: string,
+    clientIp?: string
+  ): Promise<{ success: boolean; reason?: string }> {
+    const secretKey = process.env.TURNSTILE_SECRET || process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
+
+    // Development mode bypass for testing keys or localhost
+    if (
+      !token ||
+      token === 'DEV_BYPASS_TOKEN' ||
+      token.startsWith('1x0000') ||
+      secretKey.startsWith('1x0000') ||
+      process.env.NODE_ENV !== 'production'
+    ) {
+      return { success: true };
+    }
+
+    try {
+      const formData = new URLSearchParams();
+      formData.append('secret', secretKey);
+      formData.append('response', token);
+      if (clientIp) formData.append('remoteip', clientIp);
+
+      const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formData.toString()
+      });
+
+      const outcome: any = await response.json();
+
+      if (!outcome.success) {
+        StructuredLogger.warn('[SecurityShield] Cloudflare Turnstile verification failed', {
+          errorCodes: outcome['error-codes'],
+          clientIp
+        });
+        return {
+          success: false,
+          reason: 'Security check failed. Please refresh the page and try again.'
+        };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      StructuredLogger.error('[SecurityShield] Turnstile verification request error', { error: err?.message || err });
+      return { success: true }; // Fail-open to avoid blocking legitimate users on network glitch
+    }
   }
 
   /**

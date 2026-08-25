@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import prisma from '../../lib/prisma';
 import { TenantConfigCache, TenantConfig } from '../cache/TenantConfigCache';
 import { PromptService } from './PromptService';
 import { RetrievalService } from './RetrievalService';
@@ -6,6 +7,7 @@ import { ConversationService } from './ConversationService';
 import { SecurityShieldService } from '../security/SecurityShieldService';
 import { StructuredLogger } from '../logger/StructuredLogger';
 import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
+import { AiLogService } from '../logger/AiLogService';
 import {
   isNoisyTranscript,
   normalizeHindiToUrdu,
@@ -50,6 +52,10 @@ function detectCompetitor(query: string, currentTenantName?: string): string | n
   return null;
 }
 
+function ts(): string {
+  return new Date().toISOString().substring(11, 23);
+}
+
 export interface VoiceSessionParams {
   socket: WebSocket;
   sessionId?: string;
@@ -57,6 +63,7 @@ export interface VoiceSessionParams {
   publicKey?: string;
   slug?: string;
   language?: string;
+  clientIp?: string;
 }
 
 export class RealtimeSessionManager {
@@ -68,6 +75,9 @@ export class RealtimeSessionManager {
   private dbSession: any = null;
   private leadId: number | null = null;
 
+  // Client IP for concurrent session throttling
+  private clientIp: string = '127.0.0.1';
+
   // Session-level language memory & confidence tracking
   private sessionPreferredLanguage: 'English' | 'Urdu' | 'RomanUrdu' | null = null;
   private languageConfidenceStreak: number = 0;
@@ -75,7 +85,7 @@ export class RealtimeSessionManager {
   // Track previous turn for multi-turn query contextualization
   private lastUserTurn: string = '';
 
-  // Turn counter for greeting replay protection & pipeline tracking
+  // Turn counter for limit enforcement
   private turnCount: number = 0;
 
   // Per-turn state
@@ -84,12 +94,17 @@ export class RealtimeSessionManager {
   private turnStartTime: number = 0;
   private selectedVoice: string = 'shimmer';
 
-  // Lifecycle guards
+  // Lifecycle guards & timers
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
   private isResponseInProgress: boolean = false;
-  private isTurnCapReached: boolean = false;
+  private isClosingGracefully: boolean = false;
   private lastTurnTimestamp: number = 0;
+
+  // Production Safeguard Timers
+  private maxDurationTimer: NodeJS.Timeout | null = null;
+  private silenceTimeoutTimer: NodeJS.Timeout | null = null;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
 
   private agentId?: string;
   private publicKey?: string;
@@ -102,18 +117,69 @@ export class RealtimeSessionManager {
     this.publicKey = params.publicKey;
     this.slug = params.slug;
     this.language = params.language === 'ur' ? 'Urdu' : 'English';
+    this.clientIp = params.clientIp || '127.0.0.1';
   }
 
   private sendResponseCreate(payload: any) {
     if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
     if (this.isResponseInProgress) {
-      console.log(`[PIPELINE] ⚠️ Active response in progress — sending response.cancel before creating new response`);
+      console.log(`[PIPELINE ${ts()}] ⚠️ Active response in progress — cancelling before new response`);
       try {
         this.openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
       } catch (_) {}
       this.isResponseInProgress = false;
     }
     this.openAiWs.send(JSON.stringify(payload));
+  }
+
+  private resetSilenceTimeout() {
+    if (this.silenceTimeoutTimer) clearTimeout(this.silenceTimeoutTimer);
+    // 90-Second VAD Silence Auto-Disconnect Guard
+    this.silenceTimeoutTimer = setTimeout(() => {
+      console.log(`[SESSION LIFECYCLE ${ts()}] ⏱ SILENCE TIMEOUT (90s no speech) — triggering graceful disconnect`);
+      this.gracefulClose('Session closed due to 90 seconds of inactivity.');
+    }, 90 * 1000);
+  }
+
+  private startHeartbeat() {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    // 30-Second Ping/Pong Heartbeat to prevent zombie WebSocket connections
+    this.heartbeatInterval = setInterval(() => {
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.socket.ping();
+      }
+    }, 30 * 1000);
+  }
+
+  private cleanupTimers() {
+    if (this.maxDurationTimer) { clearTimeout(this.maxDurationTimer); this.maxDurationTimer = null; }
+    if (this.silenceTimeoutTimer) { clearTimeout(this.silenceTimeoutTimer); this.silenceTimeoutTimer = null; }
+    if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+    SecurityShieldService.unregisterVoiceCallSession(this.clientIp, this);
+  }
+
+  private gracefulClose(reasonMessage: string) {
+    if (this.isClosingGracefully) return;
+    this.isClosingGracefully = true;
+
+    console.log(`[SESSION LIFECYCLE ${ts()}] 🛑 GRACEFUL CLOSE INITIATED: "${reasonMessage}"`);
+
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      try {
+        this.socket.send(JSON.stringify({ type: 'error', message: reasonMessage }));
+      } catch (_) {}
+    }
+
+    // Brief delay to allow browser to flush final audio output before socket teardown
+    setTimeout(() => {
+      if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
+        this.openAiWs.close();
+      }
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.socket.close();
+      }
+      this.cleanupTimers();
+    }, 1500);
   }
 
   async start(): Promise<void> {
@@ -124,17 +190,61 @@ export class RealtimeSessionManager {
       return;
     }
 
+    // ── 0. Safeguard: IP Concurrent Call Cap Check (Max 3/IP) ────────────────
+    const ipCheck = SecurityShieldService.checkIpConcurrentCallCap(this.clientIp, 3);
+    if (!ipCheck.allowed) {
+      console.log(`[SESSION LIFECYCLE ${ts()}] 🚫 IP CONCURRENT CALL CAP BLOCKED for IP: ${this.clientIp}`);
+      this.socket.send(JSON.stringify({ type: 'error', message: ipCheck.reason }));
+      this.socket.close();
+      return;
+    }
+    SecurityShieldService.registerVoiceCallSession(this.clientIp, this);
+
     // ── 1. Resolve Tenant Configuration ──────────────────────────────────────
     try {
       this.tenantConfig = await TenantConfigCache.getTenantConfig(this.publicKey, this.agentId, this.slug);
     } catch (err: any) {
       StructuredLogger.error('[SESSION] Failed to resolve tenant config', { error: err?.message });
       this.socket.send(JSON.stringify({ type: 'error', message: 'Tenant configuration failure' }));
+      this.cleanupTimers();
       this.socket.close();
       return;
     }
 
     const { tenantId, agent } = this.tenantConfig;
+
+    // ── Pre-flight Tenant Quota Check ───────────────────────────────────────
+    if (this.sessionIdNum) {
+      const sessionCtx = await ConversationService.getSessionContext(this.sessionIdNum, tenantId);
+      this.dbSession = sessionCtx.dbSession;
+      this.leadId = sessionCtx.leadId;
+
+      // Resume turn count for Session Re-hydration (prevents turn cap refresh bypass)
+      if (sessionCtx.recentMessages && sessionCtx.recentMessages.length > 0) {
+        const visitorMsgCount = sessionCtx.recentMessages.filter(m => m.sender === 'visitor' || m.sender === 'user').length;
+        this.turnCount = visitorMsgCount;
+        console.log(`[SESSION RE-HYDRATION ${ts()}] Resumed existing session #${this.sessionIdNum} with ${this.turnCount} turn(s)`);
+      }
+
+      try {
+        await prisma.visitorSession.update({
+          where: { id: this.sessionIdNum },
+          data: { channel: 'voice' }
+        });
+      } catch (err: any) {
+        StructuredLogger.warn('[RealtimeSessionManager] Failed to update session channel to voice', { error: err?.message });
+      }
+    }
+
+    // Start Safeguard Timers
+    this.startHeartbeat();
+    this.resetSilenceTimeout();
+
+    // 15-Minute Max Call Duration Hard Cap Guard
+    this.maxDurationTimer = setTimeout(() => {
+      console.log(`[SESSION LIFECYCLE ${ts()}] ⏱ MAX SESSION DURATION (15 minutes) REACHED — closing session`);
+      this.gracefulClose('Max session call duration of 15 minutes reached.');
+    }, 15 * 60 * 1000);
 
     // Configurable voice parameters with fallback to enterprise production defaults
     const vSettings = (agent.voiceSettings as any) || {};
@@ -145,44 +255,30 @@ export class RealtimeSessionManager {
     const minTranscriptLength = typeof vSettings.minTranscriptLength === 'number' ? vSettings.minTranscriptLength : 3;
     const minWordCount = typeof vSettings.minWordCount === 'number' ? vSettings.minWordCount : 2;
 
-    // Normalise voice to a valid OpenAI Realtime WebSocket voice name
     const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
     const rawVoice = (agent.voice || 'shimmer').toLowerCase();
     this.selectedVoice = validVoices.includes(rawVoice) ? rawVoice : 'shimmer';
 
-    console.log(`\n[SESSION LIFECYCLE] ▶ Session START`);
+    console.log(`\n[SESSION LIFECYCLE ${ts()}] ▶ Session START`);
     console.log(`  Tenant     : ${agent.name} (${tenantId})`);
-    console.log(`  Agent ID   : ${agent.id}`);
-    console.log(`  Voice      : ${this.selectedVoice}`);
-    console.log(`  Language   : ${this.language}`);
-    console.log(`  VAD Config : threshold=${vadThreshold}, silence=${vadSilenceDurationMs}ms, prefix=${vadPrefixPaddingMs}ms`);
-    console.log(`  Timing     : targetThinkingDelay=${voiceResponseDelayMs}ms`);
+    console.log(`  Voice      : ${this.selectedVoice} | IP: ${this.clientIp}`);
+    console.log(`  Turn Count : ${this.turnCount}/20 (Voice Cap)`);
 
-    // ── 2. Load DB Session & Lead ─────────────────────────────────────────────
-    if (this.sessionIdNum) {
-      const sessionCtx = await ConversationService.getSessionContext(this.sessionIdNum, tenantId);
-      this.dbSession = sessionCtx.dbSession;
-      this.leadId = sessionCtx.leadId;
-    }
-
-    // ── 3. Build lean base system prompt (NO static KB — RAG injects per-turn) ─
+    // ── Build base system prompt ─────────────────────────────────────────────
     const baseInstructions = PromptService.buildSystemPrompt({
       tenantConfig: this.tenantConfig,
       language: this.language,
       isVoice: true,
     });
 
-    // ── 4. Open OpenAI Realtime WebSocket ─────────────────────────────────────
+    // ── Open OpenAI Realtime WebSocket ───────────────────────────────────────
     const openAiUrl = 'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini';
-    console.log(`[SESSION LIFECYCLE] Connecting to OpenAI Realtime: ${openAiUrl}`);
-
     this.openAiWs = new WebSocket(openAiUrl, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
 
-    // ── 5. Session initialisation ─────────────────────────────────────────────
     this.openAiWs.on('open', () => {
-      console.log(`[SESSION LIFECYCLE] WebSocket CONNECTED to OpenAI`);
+      console.log(`[SESSION LIFECYCLE ${ts()}] WebSocket CONNECTED to OpenAI`);
       StructuredLogger.info('[SESSION] Connected to OpenAI Realtime', {
         tenantId, voice: this.selectedVoice, agentName: agent.name,
       });
@@ -216,120 +312,90 @@ export class RealtimeSessionManager {
       };
 
       this.openAiWs?.send(JSON.stringify(sessionConfig));
-      console.log(`[SESSION LIFECYCLE] session.update sent — waiting for session.updated confirmation`);
     });
 
-    // ── 6. Proxy audio from browser → OpenAI (pass-through only) ─────────────
+    // ── Proxy audio from browser → OpenAI ────────────────────────────────────
     this.socket.on('message', (message: WebSocket.RawData) => {
+      const textMessage = typeof message === 'string' ? message : message.toString('utf-8');
       try {
-        const msg = JSON.parse(message.toString());
-        if (msg.type !== 'input_audio_buffer.append') {
-          console.log(`[SESSION LIFECYCLE] Client → OpenAI: ${msg.type}`);
+        const msg = JSON.parse(textMessage);
+        if (msg.type === 'ping') {
+          this.socket.send(JSON.stringify({ type: 'pong' }));
+          return;
         }
       } catch (_) {}
 
       if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-        this.openAiWs.send(message.toString());
+        this.openAiWs.send(textMessage);
       }
     });
 
-    // ── 7. Handle OpenAI events — orchestrate every voice turn ────────────────
+    // ── Handle events from OpenAI → browser ──────────────────────────────────
     this.openAiWs.on('message', async (data: WebSocket.RawData) => {
-      const msgStr = data.toString();
-      const ts = () => new Date().toISOString();
-
-      if (this.socket.readyState === WebSocket.OPEN) {
-        this.socket.send(msgStr);
-      }
-
       let event: any;
       try {
-        event = JSON.parse(msgStr);
+        event = JSON.parse(data.toString());
       } catch (_) {
         return;
       }
 
-      const audioEventTypes = new Set([
-        'response.audio.delta',
-        'response.output_audio.delta',
-        'response.audio_transcript.delta',
-        'response.output_audio_transcript.delta',
-      ]);
-      if (!audioEventTypes.has(event.type)) {
-        console.log(`[TRACE ${ts()}] ${event.type}${event.error?.message ? ' — ERROR: ' + event.error.message : ''}`);
+      // Relay event to browser client
+      if (this.socket.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify(event));
       }
 
-      // ── session.updated: log effective config & send verbatim greeting ──────
-      if (event.type === 'session.updated') {
-        const s = event.session;
-        const cr = s.audio?.input?.turn_detection?.create_response;
-        const txModel = s.audio?.input?.transcription?.model;
-        console.log(`\n[SESSION CONFIG — EFFECTIVE]`);
-        console.log(`  Model              : ${s.model}`);
-        console.log(`  Voice              : ${s.audio?.output?.voice ?? '(not set)'}`);
-        console.log(`  Transcription Model: ${txModel ?? '(none — transcription DISABLED)'}`);
-        console.log(`  VAD threshold      : ${s.audio?.input?.turn_detection?.threshold}`);
-        console.log(`  VAD silenceMs      : ${s.audio?.input?.turn_detection?.silence_duration_ms}`);
-        console.log(`  create_response    : ${cr === false ? 'FALSE ✅ (backend controls responses)' : 'TRUE ⚠'}`);
-        console.log(`─────────────────────────────────────────────────────────\n`);
-
-        if (!this.greetingSent && this.turnCount === 0) {
-          this.greetingSent = true;
-          const greetingText = agent.initialGreetingMessage || 'Assalam-u-Alaikum! How can I help you today?';
-          console.log(`[SESSION LIFECYCLE] GREETING SEND (verbatim, once only) — "${greetingText}"`);
-
-          if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            this.sendResponseCreate({
-              type: 'response.create',
-              response: {
-                instructions: `You MUST speak EXACTLY the following text, word for word, with no additions, modifications, or reinterpretation: "${greetingText}"`,
-              },
-            });
-          }
-
-          if (!this.sessionReadySent && this.socket.readyState === WebSocket.OPEN) {
-            this.sessionReadySent = true;
-            this.socket.send(JSON.stringify({ type: 'session.ready' }));
-            console.log(`[SESSION LIFECYCLE] session.ready sent to browser client`);
-          }
-        } else {
-          console.log(`[SESSION LIFECYCLE] session.updated received — greeting NOT re-sent (turnCount: ${this.turnCount}, greetingSent: ${this.greetingSent})`);
+      if (event.type === 'session.updated' && !this.sessionReadySent) {
+        this.sessionReadySent = true;
+        console.log(`[SESSION LIFECYCLE ${ts()}] session.updated confirmed`);
+        if (this.socket.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({ type: 'session.ready' }));
         }
-      }
 
-      // ── Turn pipeline trace & barge-in tracking ───────────────────────────
-      if (event.type === 'input_audio_buffer.speech_started') {
-        this.turnCount++;
-        console.log(`\n╔══════════════════════════════════════════════════════╗`);
-        console.log(`║  VOICE TURN START #${this.turnCount}  @ ${ts()}  ║`);
-        console.log(`╚══════════════════════════════════════════════════════╝`);
-      }
+        // Send initial greeting on connection
+        if (!this.greetingSent) {
+          this.greetingSent = true;
+          const isUrdu = this.language === 'Urdu';
+          const agentName = this.tenantConfig?.agent.name || 'EFU General Insurance';
+          const greetingText = isUrdu
+            ? `سلام! میں ${agentName} کی خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتی ہوں؟`
+            : `Hello! I am the AI Virtual Support Assistant for ${agentName}. How may I assist you today?`;
 
-      if (event.type === 'input_audio_buffer.speech_stopped') {
-        console.log(`[PIPELINE ${ts()}] ↓ speech_stopped`);
-      }
+          const langDirective = isUrdu
+            ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+            : `[RESPOND 100% IN ENGLISH]`;
 
-      if (event.type === 'input_audio_buffer.committed') {
-        console.log(`[PIPELINE ${ts()}] ↓ committed — awaiting transcription...`);
+          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [INITIAL GREETING]`);
+          this.sendResponseCreate({
+            type: 'response.create',
+            response: {
+              instructions: `${langDirective}\n[GREETING DIRECTIVE]: Speak EXACTLY this greeting text in ${this.language}: "${greetingText}"`,
+            },
+          });
+        }
       }
 
       if (event.type === 'response.created') {
         this.isResponseInProgress = true;
-        const isGreeting = !this.pendingTurnAudit && this.greetingSent && this.aiTranscriptBuffer === '';
-        console.log(`[PIPELINE ${ts()}] ⚡ response.created${isGreeting ? ' [GREETING — expected]' : ' [USER TURN]'}`);
       }
 
       if (event.type === 'response.done' || event.type === 'response.cancelled') {
         this.isResponseInProgress = false;
         console.log(`[PIPELINE ${ts()}] ↓ response.done`);
+
+        if (this.isClosingGracefully) {
+          console.log(`[SESSION LIFECYCLE ${ts()}] Final response.done received during graceful close — tearing down socket`);
+          setTimeout(() => {
+            if (this.socket && this.socket.readyState === WebSocket.OPEN) this.socket.close();
+            if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) this.openAiWs.close();
+            this.cleanupTimers();
+          }, 800);
+        }
       }
 
-      // ── Accumulate AI speech for DB logging ──────────────────────────────
       if (event.type === 'response.output_audio_transcript.delta' && event.delta) {
         this.aiTranscriptBuffer += event.delta;
       }
 
-      // ── response.done: save AI message + finalise audit log ──────────────
       if (event.type === 'response.done') {
         if (this.tenantConfig && this.sessionIdNum && this.leadId && this.aiTranscriptBuffer.trim()) {
           await ConversationService.saveMessage({
@@ -347,10 +413,40 @@ export class RealtimeSessionManager {
         if (this.pendingTurnAudit) {
           this.pendingTurnAudit.latencyMs = Date.now() - this.turnStartTime;
           const usage = event.response?.usage;
+          const promptTokens = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+          const completionTokens = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
           if (usage) {
-            this.pendingTurnAudit.totalTokens = usage.total_tokens ?? undefined;
+            this.pendingTurnAudit.totalTokens = usage.total_tokens ?? (promptTokens + completionTokens);
           }
           VoiceAuditLogger.printFinal(this.pendingTurnAudit);
+
+          if (this.tenantConfig) {
+            AiLogService.logRequest({
+              tenantId: this.tenantConfig.tenantId,
+              agentId: this.tenantConfig.agent.id,
+              visitorSessionId: this.sessionIdNum || undefined,
+              mode: 'voice',
+              userQuery: this.lastUserTurn || 'Realtime Voice Turn',
+              modelUsed: 'gpt-realtime-mini',
+              voiceUsed: this.selectedVoice,
+              promptTokens,
+              completionTokens,
+              latencyMs: this.pendingTurnAudit.latencyMs
+            });
+          }
+
+          if (this.sessionIdNum) {
+            const voiceCost = (promptTokens * 0.01 + completionTokens * 0.02) / 1000;
+            prisma.visitorSession.update({
+              where: { id: this.sessionIdNum },
+              data: {
+                totalInputTokens: { increment: promptTokens },
+                totalOutputTokens: { increment: completionTokens },
+                estimatedCost: { increment: voiceCost }
+              }
+            }).catch(err => console.error('[RealtimeSessionManager] Failed to update VisitorSession token counts:', err));
+          }
+
           this.pendingTurnAudit = null;
         }
 
@@ -366,7 +462,7 @@ export class RealtimeSessionManager {
         }
       }
 
-      // ── CORE: Backend-authoritative RAG & Intent orchestration ─────────────
+      // ── Core Audio Transcription Turn Handling ─────────────────────────────
       if (
         event.type === 'conversation.item.input_audio_transcription.completed' &&
         event.transcript
@@ -374,48 +470,22 @@ export class RealtimeSessionManager {
         const rawSpeech = event.transcript.trim();
         if (!rawSpeech || !this.tenantConfig) return;
 
-        // 1. Normalize Devanagari (Hindi) Unicode if present
+        // Reset silence timeout on user activity
+        this.resetSilenceTimeout();
+
         const userSpeech = normalizeHindiToUrdu(rawSpeech);
 
-        // 2. Transcript Validation Gate (#3, #8)
         if (isNoisyTranscript(userSpeech, minTranscriptLength, minWordCount)) {
-          console.log(`[PIPELINE ${ts()}] ⏭ IGNORED noisy/short transcript: "${userSpeech}" — remaining in listening mode`);
-          const ignoredAudit: VoiceAuditRecord = {
-            conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
-            userTranscript: userSpeech,
-            detectedLanguage: this.sessionPreferredLanguage || 'English',
-            dominantLanguage: this.sessionPreferredLanguage || 'English',
-            previousSessionLanguage: this.sessionPreferredLanguage || undefined,
-            finalResponseLanguage: this.sessionPreferredLanguage || undefined,
-            greetingReplayDetected: false,
-            ignoredTranscript: true,
-            transcriptLength: userSpeech.length,
-            wordCount: userSpeech.split(/\s+/).length,
-            thinkingDelayMs: 0,
-            retrievalLatencyMs: 0,
-            embeddingGenerated: false,
-            topMatches: [],
-            similarityThreshold: 0,
-            highestSimilarity: 0,
-            decision: 'IGNORED_NOISE',
-            fallbackTriggered: false,
-            gptInvoked: false,
-            responseType: 'Ignored',
-            retrievedSources: 0,
-            voice: this.selectedVoice,
-            latencyMs: 0,
-          };
-          VoiceAuditLogger.print(ignoredAudit);
-          VoiceAuditLogger.printFinal(ignoredAudit);
+          console.log(`[PIPELINE ${ts()}] ⏭ IGNORED noisy transcript: "${userSpeech}"`);
           return;
         }
 
         this.turnStartTime = Date.now();
         const tTranscriptDone = Date.now();
+        this.turnCount++;
 
-        console.log(`[PIPELINE ${ts()}] ↓ transcription.completed — "${userSpeech.substring(0, 80)}"`);
+        console.log(`[PIPELINE ${ts()}] ↓ transcription.completed (Turn #${this.turnCount}) — "${userSpeech.substring(0, 80)}"`);
 
-        // 3. Dominant Language Classification & Per-Turn Language Matching
         const prevLang = this.sessionPreferredLanguage;
         const dominantLang = detectDominantLanguage(userSpeech);
 
@@ -432,7 +502,6 @@ export class RealtimeSessionManager {
           }
         }
 
-        // Match the current turn's dominant spoken language
         const detectedLanguage: 'English' | 'Urdu' | 'RomanUrdu' = dominantLang;
         const isUrdu = detectedLanguage === 'Urdu' || detectedLanguage === 'RomanUrdu';
 
@@ -444,14 +513,16 @@ export class RealtimeSessionManager {
         }
         this.lastTurnTimestamp = nowMs;
 
-        // ── Security Layer 2: Session Turn Cap Check ────────────────────────
-        const turnCapCheck = SecurityShieldService.checkSessionTurnCap(this.turnCount, 25);
+        // ── Security Layer 2: Voice Session Turn Cap & Warning Check ────────
+        const turnCapCheck = SecurityShieldService.checkSessionTurnCap(this.turnCount, 'voice');
+
+        // Turn 20: Hard Cap Reached
         if (turnCapCheck.exceeded) {
-          console.log(`[PIPELINE ${ts()}] 🛑 SESSION TURN CAP REACHED (${this.turnCount}/25) — sending turn limit notice`);
-          this.isTurnCapReached = true;
+          console.log(`[PIPELINE ${ts()}] 🛑 VOICE SESSION TURN CAP REACHED (Turn #${this.turnCount}/20) — initiating graceful goodbye`);
+          this.isClosingGracefully = true;
           const capNotice = isUrdu
-            ? 'آپ کے وائس سیشن کی گفتگو کی حد مکمل ہو چکی ہے۔ مزید معلومات کے لیے اپنا نمبر چھوڑ دیں۔'
-            : 'You have reached the session conversation limit. Please leave your contact details so our support team can follow up with you.';
+            ? 'آپ کی گفتگو کی 20 باریوں کی حد مکمل ہو چکی ہے۔ برائے مہربانی اپنا رابطہ نمبر چھوڑ دیں تاکہ ہماری ٹیم آپ سے رابطہ کر سکے۔ شکریہ!'
+            : 'You have reached the voice session limit of 20 turns. Please leave your contact details so our support team can follow up with you. Thank you!';
 
           this.sendResponseCreate({
             type: 'response.create',
@@ -462,10 +533,19 @@ export class RealtimeSessionManager {
           return;
         }
 
+        // Turn 14: 70% Early Warning Directive
+        let warning70Directive = '';
+        if (turnCapCheck.warning70Percent) {
+          console.log(`[PIPELINE ${ts()}] ⚠️ 70% TURN WARNING TRIGGERED (Turn #14 of 20)`);
+          warning70Directive = isUrdu
+            ? `\n[70% TURN LIMIT NOTICE]: Mention warmly to the user that they have reached 70% of their conversation turn limit (Turn 14 of 20) and are approaching their session cap.`
+            : `\n[70% TURN LIMIT NOTICE]: Inform the user politely that they have reached 70% of their session turn limit (Turn 14 of 20) and are approaching their cap.`;
+        }
+
         // ── Security Layer 3: Prompt Injection Shield ───────────────────────
         const injectionMatch = SecurityShieldService.detectPromptInjection(userSpeech);
         if (injectionMatch) {
-          console.log(`[PIPELINE ${ts()}] 🛡 PROMPT INJECTION SHIELD TRIGGERED: "${injectionMatch}" — refusing payload`);
+          console.log(`[PIPELINE ${ts()}] 🛡 PROMPT INJECTION SHIELD TRIGGERED — refusing payload`);
           const refusalMsg = isUrdu
             ? 'معذرت، میں آپ کی اس درخواست کا جواب نہیں دے سکتا۔ میں صرف ہماری کمپنی کی سروسز میں مدد کر سکتا ہوں۔'
             : 'I cannot fulfill requests attempting to alter system instructions. How can I assist you with our services today?';
@@ -498,54 +578,15 @@ export class RealtimeSessionManager {
 
         if (isGreeting || isAffirmation) {
           const intentDecision = isGreeting ? 'CONVERSATIONAL_GREETING' : 'CONVERSATIONAL_AFFIRMATION';
-          console.log(`[PIPELINE ${ts()}] 💬 ${intentDecision} DETECTED: "${userSpeech}" — using Agent System Prompt, bypassing fallback`);
-
-          const greetingAudit: VoiceAuditRecord = {
-            conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
-            userTranscript: userSpeech,
-            detectedLanguage,
-            dominantLanguage: dominantLang,
-            previousSessionLanguage: prevLang || undefined,
-            finalResponseLanguage: detectedLanguage,
-            greetingReplayDetected: false,
-            ignoredTranscript: false,
-            transcriptLength: userSpeech.length,
-            wordCount: userSpeech.split(/\s+/).length,
-            thinkingDelayMs: 0,
-            retrievalLatencyMs: 0,
-            embeddingGenerated: false,
-            topMatches: [],
-            similarityThreshold: 0,
-            highestSimilarity: 0,
-            decision: intentDecision as any,
-            fallbackTriggered: false,
-            gptInvoked: true,
-            responseType: 'SystemPrompt',
-            retrievedSources: 0,
-            voice: this.selectedVoice,
-            latencyMs: Date.now() - this.turnStartTime,
-          };
-          this.pendingTurnAudit = greetingAudit;
-          VoiceAuditLogger.print(greetingAudit);
-
-          if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
-
-          // Apply natural thinking delay before natural persona response
-          const delayMs = computeThinkingDelay(Date.now() - tTranscriptDone, voiceResponseDelayMs);
-          if (delayMs > 0) {
-            await new Promise((r) => setTimeout(r, delayMs));
-          }
-          // Per-turn language & gender mandate for greetings too
           const greetingLangMandate = isUrdu
-            ? `[STRICT LANGUAGE & GENDER MANDATE]: Respond in URDU. You are a FEMALE assistant — use female verbs ("سمجھتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs. No Hindi words.`
-            : `[STRICT LANGUAGE MANDATE]: Respond in ENGLISH only.`;
+            ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+            : `[RESPOND 100% IN ENGLISH]`;
 
           this.lastUserTurn = userSpeech;
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [SYSTEM PROMPT PERSONA PATH]`);
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${greetingLangMandate}\n[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional enterprise support agent. If asked about our services or company overview, introduce our primary services clearly.`,
+              instructions: `${greetingLangMandate}${warning70Directive}\n[USER TURN]: "${userSpeech}"\nRespond warmly and clearly in ${detectedLanguage} as a professional support agent.`,
             },
           });
           return;
@@ -554,51 +595,11 @@ export class RealtimeSessionManager {
         // ── Competitor Shield Guard ──────────────────────────────────────────
         const competitorMatch = detectCompetitor(userSpeech, this.tenantConfig.agent.name);
         if (competitorMatch) {
-          console.log(`[PIPELINE ${ts()}] 🚫 COMPETITOR DETECTED: "${competitorMatch}" — skipping retrieval, returning fallback immediately`);
-
           const fallbackText = isUrdu
-            ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu ||
-              'معذرت، میں صرف ہماری کمپنی کی خدمات اور ویب سائٹ کی معلومات کا جواب دے سکتا ہوں۔'
-            : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage ||
-              'I can only answer questions related to our services and official knowledge base.';
-
-          const competitorAudit: VoiceAuditRecord = {
-            conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
-            userTranscript: userSpeech,
-            detectedLanguage,
-            dominantLanguage: dominantLang,
-            previousSessionLanguage: prevLang || undefined,
-            finalResponseLanguage: detectedLanguage,
-            greetingReplayDetected: false,
-            ignoredTranscript: false,
-            transcriptLength: userSpeech.length,
-            wordCount: userSpeech.split(/\s+/).length,
-            thinkingDelayMs: 0,
-            retrievalLatencyMs: 0,
-            embeddingGenerated: false,
-            topMatches: [],
-            similarityThreshold: 0,
-            highestSimilarity: 0,
-            decision: 'OUT_OF_SCOPE',
-            fallbackTriggered: true,
-            gptInvoked: false,
-            responseType: 'Fallback',
-            retrievedSources: 0,
-            voice: this.selectedVoice,
-            latencyMs: Date.now() - this.turnStartTime,
-          };
-          VoiceAuditLogger.print(competitorAudit);
-          VoiceAuditLogger.printFinal(competitorAudit);
-
-          if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
-
-          const delayMs = computeThinkingDelay(Date.now() - tTranscriptDone, voiceResponseDelayMs);
-          if (delayMs > 0) {
-            await new Promise((r) => setTimeout(r, delayMs));
-          }
+            ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu || 'معذرت، میں صرف ہماری کمپنی کی خدمات کی معلومات کا جواب دے سکتا ہوں۔'
+            : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage || 'I can only answer questions related to our services and official knowledge base.';
 
           this.lastUserTurn = userSpeech;
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [COMPETITOR GUARD fallback]`);
           this.sendResponseCreate({
             type: 'response.create',
             response: {
@@ -608,134 +609,85 @@ export class RealtimeSessionManager {
           return;
         }
 
-        // ── Intent Path B: Grounded Vector Search (RAG) ─────────────────────
+        // ── Intent Path B: Grounded Vector Search (RAG, topK = 4) ──────────
         const rawThreshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.35;
-        // FIX 1: Language-aware threshold — Urdu queries against English-indexed KB naturally score ~0.25-0.33
         const threshold = isUrdu ? Math.min(rawThreshold, 0.25) : Math.min(rawThreshold, 0.38);
         const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
-        console.log(`[PIPELINE ${ts()}] ↓ RetrievalService.search() — query: "${searchQuery.substring(0, 80)}", threshold: ${threshold} (lang: ${detectedLanguage})`);
 
         const retrieval = await RetrievalService.search(
           this.tenantConfig.tenantId,
           searchQuery,
-          5,
+          4,
           threshold,
         );
 
         this.lastUserTurn = userSpeech;
         const retrievalMs = retrieval.timings.totalMs;
-        console.log(`[PIPELINE ${ts()}] ↓ Retrieval DONE — topSimilarity: ${retrieval.topSimilarity.toFixed(3)}, chunks: ${retrieval.chunks.length}, fallback: ${retrieval.fallbackTriggered}`);
-        console.log(`[PIPELINE ${ts()}]   Timings: embedding=${retrieval.timings.embeddingMs}ms, pgvector=${retrieval.timings.vectorSearchMs}ms, total=${retrievalMs}ms`);
-
         const thinkingDelayMs = computeThinkingDelay(retrievalMs, voiceResponseDelayMs);
-
-        const turnAudit: VoiceAuditRecord = {
-          conversationId: `${this.tenantConfig.tenantId.substring(0, 8)}-${Date.now()}`,
-          userTranscript: userSpeech,
-          detectedLanguage,
-          dominantLanguage: dominantLang,
-          previousSessionLanguage: prevLang || undefined,
-          finalResponseLanguage: detectedLanguage,
-          greetingReplayDetected: false,
-          ignoredTranscript: false,
-          transcriptLength: userSpeech.length,
-          wordCount: userSpeech.split(/\s+/).length,
-          thinkingDelayMs,
-          retrievalLatencyMs: retrievalMs,
-          embeddingGenerated: true,
-          topMatches: retrieval.chunks.slice(0, 3).map((c) => ({
-            chunkId: String(c.id ?? '?'),
-            similarity: c.similarity,
-          })),
-          similarityThreshold: threshold,
-          highestSimilarity: retrieval.topSimilarity,
-          decision: retrieval.fallbackTriggered ? 'OUT_OF_SCOPE' : 'RAG',
-          fallbackTriggered: retrieval.fallbackTriggered,
-          gptInvoked: true,
-          responseType: retrieval.fallbackTriggered ? 'Fallback' : 'RAG',
-          retrievedSources: retrieval.chunks.length,
-          voice: this.selectedVoice,
-          latencyMs: 0,
-        };
-        this.pendingTurnAudit = turnAudit;
-        VoiceAuditLogger.print(turnAudit);
 
         if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
 
         if (thinkingDelayMs > 0) {
-          console.log(`[PIPELINE ${ts()}] ⏱ Natural thinking delay: ${thinkingDelayMs}ms before response.create()`);
           await new Promise((r) => setTimeout(r, thinkingDelayMs));
         }
 
         const agentName = this.tenantConfig.agent.name?.trim() || 'EFU General Insurance';
-
-        const nonLifeMandate = `[STRICT NON-LIFE BOUNDARY]: ${agentName} is strictly a General (Non-Life) Insurance company (Motor, Health, Travel, Property, Marine, Engineering). ${agentName} DOES NOT offer, sell, or issue Life Insurance, Term Life, or Endowment plans. If asked about Life Insurance or company overview, state clearly that ${agentName} provides Non-Life insurance products only, and that Life Insurance is handled by a separate company named EFU Life.`;
-
-        // FIX 3: Per-turn mandatory language & gender directive (prevents OpenAI Realtime from reverting to male verbs or wrong language)
         const langGenderMandate = isUrdu
-          ? `[STRICT LANGUAGE & GENDER MANDATE]: You MUST respond 100% in URDU. You are a FEMALE virtual assistant — use ONLY female Urdu verbs (e.g. "کر سکتی ہوں", "سمجھتی ہوں", "بتاتی ہوں", "بتا سکتی ہوں"). NEVER use male verbs ("سکتا ہوں", "کرتا ہوں", "سمجھتا ہوں"). Do NOT use Hindi words.\n${nonLifeMandate}`
-          : `[STRICT LANGUAGE MANDATE]: The user is speaking ENGLISH. You MUST respond 100% in ENGLISH. Do NOT speak Urdu.\n${nonLifeMandate}`;
+          ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+          : `[RESPOND 100% IN ENGLISH]`;
 
-        // FIX 2: Insurance keyword safety net — detect insurance-related terms in any language before refusing
         const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
         const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(userSpeech);
 
         if (retrieval.fallbackTriggered) {
-          // FIX 4: Improved follow-up detection — checks conversation history, word count, keywords, AND insurance terms
           const isFollowUp = !!this.lastUserTurn && (
             userSpeech.split(/\s+/).length < 7 || 
             /\b(it|other|others|this|that|also|more|cost|price|details|besides|difference|compare|dono|doosri|doosra|elawa|alawa|aur|batao|konsa|konsi|mazeed|pehla|dosra|teesra|farq|muqabla|دوسرا|دوسری|علاوہ|اور|بتاؤ|مزید|پہلا|تیسرا|فرق|مقابلہ|درمیان|ڈیفرنس)\b/i.test(userSpeech)
           );
 
           if (isFollowUp || hasInsuranceKeyword) {
-            // Insurance-related query or follow-up — answer using conversation context, NOT strict refusal
             const directive = hasInsuranceKeyword && !isFollowUp
-              ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agentName} insurance services but no exact knowledge base chunk matched. Answer the query naturally and helpfully in ${detectedLanguage} using your knowledge of ${agentName} products. If you don't have specific details, offer to connect them with official ${agentName} support channels.`
-              : `[TURN DIRECTIVE]: Answer the user's follow-up query naturally and accurately in ${detectedLanguage} using recent conversation history regarding ${agentName} services.`;
+              ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agentName} insurance services but no exact chunk matched. Answer helpfully in ${detectedLanguage} using product knowledge.`
+              : `[TURN DIRECTIVE]: Answer the follow-up query naturally in ${detectedLanguage} using conversation history regarding ${agentName} services.`;
 
-            console.log(`[PIPELINE ${ts()}] → SENDING response.create() [${hasInsuranceKeyword ? 'INSURANCE KEYWORD SAFETY NET' : 'MULTI-TURN FOLLOW-UP'} DIRECTIVE]`);
             this.sendResponseCreate({
               type: 'response.create',
               response: {
-                instructions: `${langGenderMandate}\n${directive}`,
+                instructions: `${langGenderMandate}${warning70Directive}\n${directive}`,
               },
             });
           } else {
-            console.log(`[PIPELINE ${ts()}] → SENDING response.create() [STRICT OUT-OF-SCOPE REFUSAL DIRECTIVE]`);
             this.sendResponseCreate({
               type: 'response.create',
               response: {
-                instructions: `${langGenderMandate}\n[STRICT OUT-OF-SCOPE DIRECTIVE]: The user's query is NOT related to insurance. You MUST politely refuse in ${detectedLanguage}. State clearly that you are the AI assistant for ${agentName} and can only assist with ${agentName} insurance services. Under NO circumstances provide instructions, troubleshooting, or general knowledge for non-insurance topics.`,
+                instructions: `${langGenderMandate}${warning70Directive}\n[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is NOT related to insurance. Politely refuse in ${detectedLanguage}. State clearly that you are the assistant for ${agentName}.`,
               },
             });
           }
         } else {
-          // ── RAG — inject retrieved context TURN-SCOPED inside response.create (Token Optimized) ──────
           const contextOnly = retrieval.contextText;
-          const totalPipelineMs = Date.now() - tTranscriptDone;
-
-          console.log(`[PIPELINE ${ts()}] → SENDING response.create() [TOKEN OPTIMIZED TURN-SCOPED RAG] (${retrieval.chunks.length} chunks) — pipeline: ${totalPipelineMs}ms`);
-
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${langGenderMandate}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer the user's question clearly and helpfully in ${detectedLanguage} using this official ${agentName} knowledge base context. STRICT RELEVANCE GUARD: If the query is general geography, country trivia, or non-insurance topics, ONLY explain relevant ${agentName} insurance products and politely state you can only assist with ${agentName} services]:\n${contextOnly}`,
+              instructions: `${langGenderMandate}${warning70Directive}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer clearly in ${detectedLanguage} using this official ${agentName} knowledge base context]:\n${contextOnly}`,
             },
           });
         }
       }
     });
 
-    // ── 8. Cleanup & Closure ──────────────────────────────────────────────────
+    // ── Cleanup & Closure Event Listeners ────────────────────────────────────
     this.socket.on('close', () => {
-      console.log(`[SESSION LIFECYCLE] Browser client DISCONNECTED`);
-      if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
+      console.log(`[SESSION LIFECYCLE ${ts()}] Browser client DISCONNECTED`);
+      this.cleanupTimers();
+      if (this.openAiWs && this.openAiWs.readyState !== WebSocket.OPEN) {
         this.openAiWs.close();
       }
     });
 
     this.openAiWs.on('close', () => {
-      console.log(`[SESSION LIFECYCLE] OpenAI WS CLOSED`);
+      console.log(`[SESSION LIFECYCLE ${ts()}] OpenAI WS CLOSED`);
+      this.cleanupTimers();
       if (this.socket.readyState === WebSocket.OPEN) {
         this.socket.close();
       }
@@ -743,6 +695,7 @@ export class RealtimeSessionManager {
 
     this.openAiWs.on('error', (err: any) => {
       StructuredLogger.error('[SESSION] OpenAI WS Error', { error: err?.message || err });
+      this.cleanupTimers();
       if (this.socket.readyState === WebSocket.OPEN) {
         this.socket.send(JSON.stringify({ type: 'error', message: 'Voice session error' }));
       }
@@ -750,6 +703,7 @@ export class RealtimeSessionManager {
 
     this.socket.on('error', (err: any) => {
       StructuredLogger.error('[SESSION] Client WS Error', { error: err?.message || err });
+      this.cleanupTimers();
     });
   }
 }

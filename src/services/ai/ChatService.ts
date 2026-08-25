@@ -1,12 +1,12 @@
-import prisma from '../../lib/prisma';
 import { TenantConfigCache } from '../cache/TenantConfigCache';
-import { ConversationService } from './ConversationService';
-import { RetrievalService } from './RetrievalService';
 import { PromptService } from './PromptService';
-import { AiGateway } from './AiGateway';
+import { RetrievalService } from './RetrievalService';
+import { ConversationService } from './ConversationService';
 import { SecurityShieldService } from '../security/SecurityShieldService';
+import { AiGateway } from './AiGateway';
+import prisma from '../../lib/prisma';
 
-export interface ChatParams {
+export interface ChatMessageParams {
   sessionId?: number;
   agentId?: string;
   publicKey?: string;
@@ -15,18 +15,16 @@ export interface ChatParams {
   language?: string;
 }
 
-export interface ChatResult {
-  reply: string;
-  sources: { title: string; url?: string }[];
-  fallbackTriggered?: boolean;
-  topicLinks?: { title: string; url: string }[];
-}
-
 export class ChatService {
   /**
-   * Process incoming text chat request using the unified AI pipeline
+   * Process an incoming visitor chat message with RAG context & safety checks
    */
-  static async handleChat(params: ChatParams): Promise<ChatResult> {
+  static async processMessage(params: ChatMessageParams): Promise<{
+    reply: string;
+    sources: any[];
+    fallbackTriggered: boolean;
+    topicLinks?: any[];
+  }> {
     const { sessionId, agentId, publicKey, slug, message, language = 'en' } = params;
 
     // 1. Resolve Tenant Configuration from Cache
@@ -60,12 +58,16 @@ export class ChatService {
       recentMessages = sessionCtx.recentMessages;
       summary = sessionCtx.summary;
 
-      // Turn Cap Check for Chat (max 40 messages)
-      if (recentMessages.length >= 40) {
+      // Count visitor turns accurately for Turn Cap Check
+      const visitorTurns = recentMessages.filter(m => m.sender === 'visitor' || m.sender === 'user').length + 1;
+      const turnCapCheck = SecurityShieldService.checkSessionTurnCap(visitorTurns, 'chat');
+
+      // Turn 25: Hard Cap Exceeded
+      if (turnCapCheck.exceeded) {
         const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
         const capNotice = isUrdu
-          ? 'آپ کے سیشن کی گفتگو کی حد مکمل ہو چکی ہے۔ مزید معلومات کے لیے اپنا نمبر چھوڑ دیں۔'
-          : 'You have reached the session conversation limit. Please leave your contact details so our support team can follow up with you.';
+          ? 'آپ کی چیٹ سیشن کی 25 باریوں کی حد مکمل ہو چکی ہے۔ برائے مہربانی اپنا رابطہ نمبر چھوڑ دیں تاکہ ہماری ٹیم آپ سے رابطہ کر سکے۔ شکریہ!'
+          : 'You have reached the chat session limit of 25 turns. Please leave your contact details so our support team can follow up with you. Thank you!';
         return {
           reply: capNotice,
           sources: [],
@@ -87,16 +89,15 @@ export class ChatService {
       }
     }
 
-    // 3. Perform Retrieval-Augmented Generation (RAG)
+    // 4. Perform Retrieval-Augmented Generation (RAG)
     const threshold = agent.RetrievalConfig?.similarityThreshold ?? 0.3;
     const retrievalResult = await RetrievalService.search(tenantId, message, 5, threshold);
 
     let reply = '';
     let topicLinks: { title: string; url: string }[] = [];
 
-    // 4. Handle Fallback vs Normal Completion
+    // 5. Handle Fallback vs Normal Completion
     if (retrievalResult.fallbackTriggered) {
-      // Load topic links for tenant/agent
       const dbTopicLinks = await prisma.agentTopicLink.findMany({
         where: { tenantId, isActive: true },
         orderBy: { displayOrder: 'asc' },
@@ -106,7 +107,6 @@ export class ChatService {
       if (dbTopicLinks.length > 0) {
         topicLinks = dbTopicLinks.map((t: any) => ({ title: t.title, url: t.url }));
       } else {
-        // Fallback to CrawledPage entries
         const crawledPages = await prisma.crawledPage.findMany({
           where: { tenantId, enabled: true },
           take: 5
@@ -116,10 +116,8 @@ export class ChatService {
           url: p.url
         }));
       }
-
     }
 
-    // Insurance keyword safety net — detect insurance-related terms in any language before refusing
     const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
     const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(message);
 
@@ -159,6 +157,19 @@ export class ChatService {
     });
 
     reply = completion.reply;
+
+    // Check Turn 18 (70% Early Warning Notice for Chat)
+    if (recentMessages.length > 0) {
+      const visitorTurnCount = recentMessages.filter(m => m.sender === 'visitor' || m.sender === 'user').length + 1;
+      const turnCheck = SecurityShieldService.checkSessionTurnCap(visitorTurnCount, 'chat');
+      if (turnCheck.warning70Percent) {
+        const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
+        const warningBanner = isUrdu
+          ? '\n\n⚠️ *اطلاع: آپ کی گفتگو کا 70 فیصد حصہ (18ویں باری) مکمل ہو چکا ہے۔ آپ جلد 25 باریوں کی حد تک پہنچنے والے ہیں۔*'
+          : '\n\n⚠️ *Notice: You have reached 70% of your chat turn limit (Turn 18 of 25). Please leave your contact details if you need further assistance after this session.*';
+        reply += warningBanner;
+      }
+    }
 
     // 6. Save AI Reply to DB
     if (dbSession && leadId) {

@@ -6,6 +6,7 @@ import { AppError } from '../middleware/error';
 import { openai, generateEmbedding } from '../utils/openai';
 import { ChatService } from '../services/ai/ChatService';
 import { VoiceService } from '../services/ai/VoiceService';
+import { SecurityShieldService } from '../services/security/SecurityShieldService';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -235,17 +236,40 @@ ${snippets}`;
     // Check if domain/widget is active
     const isActive = widgetConfig?.isActive ?? true;
 
-    const configs = tenantId ? await prisma.configuration.findMany({ where: { tenantId } }) : [];
+    const configs = tenantId
+      ? await prisma.configuration.findMany({ where: { OR: [{ tenantId }, { tenantId: null }] } })
+      : await prisma.configuration.findMany({ where: { tenantId: null } });
+
     const brandingMap: Record<string, string> = {};
+    // Load global fallback configs first
     configs.forEach(c => {
-      if (c.value) brandingMap[c.key] = c.value;
+      if (c.tenantId === null && c.value) brandingMap[c.key] = c.value;
+    });
+    // Override with tenant-specific configs
+    configs.forEach(c => {
+      if (c.tenantId && c.value) brandingMap[c.key] = c.value;
     });
 
+    const companyName = brandingMap.brand_company_name || tenant?.name || 'V3C Platform';
+    const pageTitle = brandingMap.brand_page_title || `${companyName}'s Workspace`;
+
     const branding = {
-      companyName: brandingMap.brand_company_name || tenant?.name || 'V3C Platform',
+      companyName,
+      pageTitle,
       logoUrl: brandingMap.brand_logo_url || null,
       faviconUrl: brandingMap.brand_favicon_url || null,
-      accentColor: brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+    };
+
+    const theme = {
+      primaryColor: brandingMap.theme_primary_color || '#4f46e5',
+      sidebarColor: brandingMap.theme_sidebar_color || '#FFFFFF',
+      sidebarActiveColor: brandingMap.theme_sidebar_active_color || '#4f46e5',
+      sidebarActiveTextColor: brandingMap.theme_sidebar_active_text_color || '#FFFFFF',
+      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#f59e0b',
+      textColor: brandingMap.theme_text_color || '#0f172a',
+      textHoverColor: brandingMap.theme_text_hover_color || '#4f46e5',
+      borderRadius: brandingMap.theme_border_radius || '0.625rem'
     };
 
     return {
@@ -257,6 +281,7 @@ ${snippets}`;
           slug: tenant?.slug
         },
         branding,
+        theme,
         agent: {
           id: agent.id,
           name: agent.name,
@@ -314,6 +339,13 @@ ${snippets}`;
       }
     });
 
+    const clientIp = (request.headers['cf-connecting-ip'] as string) ||
+                     (request.headers['x-real-ip'] as string) ||
+                     (request.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+                     request.ip ||
+                     request.socket.remoteAddress ||
+                     null;
+
     const session = await prisma.visitorSession.create({
       data: {
         secureId: `sess-${randomUUID()}`,
@@ -323,6 +355,7 @@ ${snippets}`;
         aiAgentId: agent.id,
         referrer: referrer || null,
         landingPage: landingPage || null,
+        ipAddress: clientIp,
         startedAt: new Date(),
         updatedAt: new Date()
       }
@@ -354,7 +387,7 @@ ${snippets}`;
       throw new AppError('Message content cannot be empty', 400);
     }
 
-    const result = await ChatService.handleChat({
+    const result = await ChatService.processMessage({
       sessionId: sessionId ? Number(sessionId) : undefined,
       agentId,
       publicKey,
@@ -517,6 +550,26 @@ Return ONLY a valid JSON array of strings, for example:
     return {
       status: 'success',
       data: { message: 'Session ended' }
+    };
+  });
+
+  // @route   POST /api/public/verify-turnstile
+  // @desc    Validate Cloudflare Turnstile token to prevent bot abuse
+  fastify.post('/verify-turnstile', async (request, reply) => {
+    const { token } = (request.body as any) || {};
+    const clientIp = (request.headers['cf-connecting-ip'] as string) ||
+                     (request.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+                     request.ip;
+
+    const outcome = await SecurityShieldService.verifyTurnstileToken(token || '', clientIp);
+
+    if (!outcome.success) {
+      throw new AppError(outcome.reason || 'Bot protection check failed', 400);
+    }
+
+    return {
+      status: 'success',
+      data: { verified: true }
     };
   });
 
