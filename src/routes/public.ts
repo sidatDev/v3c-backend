@@ -240,36 +240,39 @@ ${snippets}`;
       ? await prisma.configuration.findMany({ where: { OR: [{ tenantId }, { tenantId: null }] } })
       : await prisma.configuration.findMany({ where: { tenantId: null } });
 
-    const brandingMap: Record<string, string> = {};
-    // Load global fallback configs first
+    const tenantConfigs: Record<string, string> = {};
+    const globalConfigs: Record<string, string> = {};
+
+    // Partition configs between tenant-specific and global fallbacks
     configs.forEach(c => {
-      if (c.tenantId === null && c.value) brandingMap[c.key] = c.value;
-    });
-    // Override with tenant-specific configs
-    configs.forEach(c => {
-      if (c.tenantId && c.value) brandingMap[c.key] = c.value;
+      if (c.tenantId === tenantId && c.value) {
+        tenantConfigs[c.key] = c.value;
+      } else if (c.tenantId === null && c.value) {
+        globalConfigs[c.key] = c.value;
+      }
     });
 
-    const companyName = brandingMap.brand_company_name || tenant?.name || 'V3C Platform';
-    const pageTitle = brandingMap.brand_page_title || `${companyName}'s Workspace`;
+    // Tenant name / custom brand name takes precedence
+    const companyName = tenantConfigs.brand_company_name || tenant?.name || globalConfigs.brand_company_name || 'V3C Platform';
+    const pageTitle = tenantConfigs.brand_page_title || (companyName ? `${companyName}'s Workspace` : 'V3C Platform');
 
     const branding = {
       companyName,
       pageTitle,
-      logoUrl: brandingMap.brand_logo_url || null,
-      faviconUrl: brandingMap.brand_favicon_url || null,
-      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#4F46E5'
+      logoUrl: tenantConfigs.brand_logo_url || globalConfigs.brand_logo_url || null,
+      faviconUrl: tenantConfigs.brand_favicon_url || globalConfigs.brand_favicon_url || null,
+      accentColor: tenantConfigs.theme_accent_color || tenantConfigs.brand_accent_color || globalConfigs.theme_accent_color || agent.accentColor || '#C8E86C'
     };
 
     const theme = {
-      primaryColor: brandingMap.theme_primary_color || '#4f46e5',
-      sidebarColor: brandingMap.theme_sidebar_color || '#FFFFFF',
-      sidebarActiveColor: brandingMap.theme_sidebar_active_color || '#4f46e5',
-      sidebarActiveTextColor: brandingMap.theme_sidebar_active_text_color || '#FFFFFF',
-      accentColor: brandingMap.theme_accent_color || brandingMap.brand_accent_color || agent.accentColor || '#f59e0b',
-      textColor: brandingMap.theme_text_color || '#0f172a',
-      textHoverColor: brandingMap.theme_text_hover_color || '#4f46e5',
-      borderRadius: brandingMap.theme_border_radius || '0.625rem'
+      primaryColor: tenantConfigs.theme_primary_color || globalConfigs.theme_primary_color || '#C8E86C',
+      sidebarColor: tenantConfigs.theme_sidebar_color || globalConfigs.theme_sidebar_color || '#141B04',
+      sidebarActiveColor: tenantConfigs.theme_sidebar_active_color || globalConfigs.theme_sidebar_active_color || '#C8E86C',
+      sidebarActiveTextColor: tenantConfigs.theme_sidebar_active_text_color || globalConfigs.theme_sidebar_active_text_color || '#181F05',
+      accentColor: tenantConfigs.theme_accent_color || tenantConfigs.brand_accent_color || globalConfigs.theme_accent_color || agent.accentColor || '#C8E86C',
+      textColor: tenantConfigs.theme_text_color || globalConfigs.theme_text_color || '#F5F9EA',
+      textHoverColor: tenantConfigs.theme_text_hover_color || globalConfigs.theme_text_hover_color || '#C8E86C',
+      borderRadius: tenantConfigs.theme_border_radius || globalConfigs.theme_border_radius || '16px'
     };
 
     return {
