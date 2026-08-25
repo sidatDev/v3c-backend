@@ -259,41 +259,6 @@ export class SecurityShieldService {
     }
   }
 
-  /**
-   * Verify Turnstile Response Token via Cloudflare siteverify API
-   */
-  static async verifyTurnstileToken(token: string, remoteIp?: string): Promise<{ success: boolean; error?: string }> {
-    const secret = process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
-    if (!token) {
-      // In development or if test keys used without token
-      if (process.env.NODE_ENV === 'development') return { success: true };
-      return { success: false, error: 'Turnstile verification token missing' };
-    }
-
-    try {
-      const formData = new URLSearchParams();
-      formData.append('secret', secret);
-      formData.append('response', token);
-      if (remoteIp) formData.append('remoteip', remoteIp);
-
-      const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-        method: 'POST',
-        body: formData,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
-
-      const outcome = await res.json() as any;
-      if (outcome.success) {
-        return { success: true };
-      }
-      StructuredLogger.warn('[SecurityShield] Turnstile siteverify failed', { errorCodes: outcome['error-codes'] });
-      return { success: false, error: outcome['error-codes']?.join(', ') || 'Turnstile validation failed' };
-    } catch (err: any) {
-      StructuredLogger.error('[SecurityShield] Turnstile verification exception', { error: err?.message });
-      return { success: true }; // Fallback gracefully if network error
-    }
-  }
-
   // Daily visitor IP quota tracking (50 turns per 24 hours per visitor IP)
   private static visitorDailyTurns: Map<string, { count: number; resetTime: number }> = new Map();
 

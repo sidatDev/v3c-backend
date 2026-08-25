@@ -99,6 +99,7 @@ export class RealtimeSessionManager {
   private sessionReadySent: boolean = false;
   private isResponseInProgress: boolean = false;
   private isClosingGracefully: boolean = false;
+  private isTurnCapReached: boolean = false;
   private lastTurnTimestamp: number = 0;
 
   // Production Safeguard Timers
@@ -520,6 +521,7 @@ export class RealtimeSessionManager {
         if (turnCapCheck.exceeded) {
           console.log(`[PIPELINE ${ts()}] 🛑 VOICE SESSION TURN CAP REACHED (Turn #${this.turnCount}/20) — initiating graceful goodbye`);
           this.isClosingGracefully = true;
+          this.isTurnCapReached = true;
           const capNotice = isUrdu
             ? 'آپ کی گفتگو کی 20 باریوں کی حد مکمل ہو چکی ہے۔ برائے مہربانی اپنا رابطہ نمبر چھوڑ دیں تاکہ ہماری ٹیم آپ سے رابطہ کر سکے۔ شکریہ!'
             : 'You have reached the voice session limit of 20 turns. Please leave your contact details so our support team can follow up with you. Thank you!';
