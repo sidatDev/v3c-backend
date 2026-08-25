@@ -355,7 +355,6 @@ ${snippets}`;
         aiAgentId: agent.id,
         referrer: referrer || null,
         landingPage: landingPage || null,
-        ipAddress: clientIp,
         startedAt: new Date(),
         updatedAt: new Date()
       }
