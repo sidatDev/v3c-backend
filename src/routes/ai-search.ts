@@ -95,12 +95,17 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       }
     });
 
-    // Populate crawl statistics (count of pages) for each domain
-    const formatted = await Promise.all(domains.map(async (d) => {
-      const pageCount = await prisma.crawledPage.count({
-        where: { domainId: d.id }
-      });
+    const pageCounts = domains.length > 0 ? await prisma.crawledPage.groupBy({
+      by: ['domainId'],
+      where: { domainId: { in: domains.map(d => d.id) } },
+      _count: { id: true }
+    }) : [];
 
+    const countMap = new Map(pageCounts.map(p => [p.domainId, p._count.id]));
+
+    // Populate crawl statistics (count of pages) for each domain
+    const formatted = domains.map((d) => {
+      const pageCount = countMap.get(d.id) || 0;
       const voiceSettings = (d.Agent?.voiceSettings as any) || {};
       const crawlLimit = voiceSettings.crawlLimit || 50;
 
@@ -114,7 +119,7 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
         createdAt: d.createdAt,
         tenantId: d.tenantId
       };
-    }));
+    });
 
     return { status: 'success', data: formatted };
   });

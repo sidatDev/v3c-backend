@@ -42,11 +42,17 @@ export const protect = async (request: FastifyRequest, reply: FastifyReply) => {
     throw new AppError('Session is invalid or has expired. Please log in again.', 401);
   }
 
-  // 4. Update session last activity
-  await prisma.userSession.update({
-    where: { token },
-    data: { lastActivity: new Date() }
-  });
+  // 4. Update session last activity (throttled to once every 2 minutes to prevent connection exhaustion)
+  const now = new Date();
+  if (!session.lastActivity || (now.getTime() - new Date(session.lastActivity).getTime() > 2 * 60 * 1000)) {
+    prisma.userSession.update({
+      where: { token },
+      data: { lastActivity: now }
+    }).catch((err) => {
+      // Non-blocking catch to prevent session update failures from failing the user request
+      console.warn('[AUTH] Throttled session lastActivity update error:', err?.message || err);
+    });
+  }
 
   // 5. Grant access to protected route and attach user context
   request.user = decoded;

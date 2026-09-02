@@ -38,65 +38,70 @@ export default async function superAdminRoutes(fastify: FastifyInstance, options
       logWhere.createdAt = dateFilter;
     }
 
-    const tenants = await prisma.tenant.findMany({
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        status: true,
-        TenantLimit: {
-          select: {
-            maxConversations: true
-          }
-        },
-        Subscription: {
-          select: {
-            status: true
+    const [tenants, sessionGroups, logGroups] = await Promise.all([
+      prisma.tenant.findMany({
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          status: true,
+          TenantLimit: {
+            select: {
+              maxConversations: true
+            }
+          },
+          Subscription: {
+            select: {
+              status: true
+            }
           }
         }
-      }
-    });
-
-    const tenantUsage = await Promise.all(
-      tenants.map(async (t) => {
-        const [sessionStats, logStats] = await Promise.all([
-          prisma.visitorSession.aggregate({
-            where: { ...sessionWhere, tenantId: t.id },
-            _count: { id: true },
-            _sum: { totalInputTokens: true, totalOutputTokens: true, estimatedCost: true }
-          }),
-          prisma.aiLog.aggregate({
-            where: { ...logWhere, tenantId: t.id },
-            _count: { id: true },
-            _sum: { promptTokens: true, completionTokens: true, estimatedCost: true }
-          })
-        ]);
-
-        const sessionCount = sessionStats._count.id || 0;
-        const promptTokens = (sessionStats._sum.totalInputTokens || 0) || (logStats._sum.promptTokens || 0);
-        const completionTokens = (sessionStats._sum.totalOutputTokens || 0) || (logStats._sum.completionTokens || 0);
-        const totalTokens = promptTokens + completionTokens;
-        const totalCost = (sessionStats._sum.estimatedCost || 0) || (logStats._sum.estimatedCost || 0);
-
-        const limit = t.TenantLimit?.maxConversations || 1000;
-        const quotaPercentage = limit > 0 ? Math.min(100, Math.round((sessionCount / limit) * 100)) : 0;
-
-        return {
-          id: t.id,
-          name: t.name,
-          slug: t.slug,
-          status: t.status,
-          plan: t.Subscription && t.Subscription.length > 0 ? t.Subscription[0].status : 'Standard Plan',
-          sessionCount,
-          promptTokens,
-          completionTokens,
-          totalTokens,
-          totalCost: Math.round(totalCost * 1000000) / 1000000,
-          quotaLimit: limit,
-          quotaPercentage
-        };
+      }),
+      prisma.visitorSession.groupBy({
+        by: ['tenantId'],
+        where: { ...sessionWhere, tenantId: { not: null } },
+        _count: { id: true },
+        _sum: { totalInputTokens: true, totalOutputTokens: true, estimatedCost: true }
+      }),
+      prisma.aiLog.groupBy({
+        by: ['tenantId'],
+        where: { ...logWhere, tenantId: { not: null } },
+        _count: { id: true },
+        _sum: { promptTokens: true, completionTokens: true, estimatedCost: true }
       })
-    );
+    ]);
+
+    const sessionMap = new Map(sessionGroups.map(g => [g.tenantId, g]));
+    const logMap = new Map(logGroups.map(g => [g.tenantId, g]));
+
+    const tenantUsage = tenants.map((t) => {
+      const sessionStats = sessionMap.get(t.id);
+      const logStats = logMap.get(t.id);
+
+      const sessionCount = sessionStats?._count.id || 0;
+      const promptTokens = (sessionStats?._sum.totalInputTokens || 0) || (logStats?._sum.promptTokens || 0);
+      const completionTokens = (sessionStats?._sum.totalOutputTokens || 0) || (logStats?._sum.completionTokens || 0);
+      const totalTokens = promptTokens + completionTokens;
+      const totalCost = (sessionStats?._sum.estimatedCost || 0) || (logStats?._sum.estimatedCost || 0);
+
+      const limit = t.TenantLimit?.maxConversations || 1000;
+      const quotaPercentage = limit > 0 ? Math.min(100, Math.round((sessionCount / limit) * 100)) : 0;
+
+      return {
+        id: t.id,
+        name: t.name,
+        slug: t.slug,
+        status: t.status,
+        plan: t.Subscription && t.Subscription.length > 0 ? t.Subscription[0].status : 'Standard Plan',
+        sessionCount,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        totalCost: Math.round(totalCost * 1000000) / 1000000,
+        quotaLimit: limit,
+        quotaPercentage
+      };
+    });
 
     // Sort leaderboard by total tokens descending
     tenantUsage.sort((a, b) => b.totalTokens - a.totalTokens);

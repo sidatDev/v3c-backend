@@ -55,33 +55,29 @@ export default async function analyticsRoutes(fastify: FastifyInstance, options:
     const { sessionWhere, logWhere } = buildWhereConditions(user, query);
 
     const [
-      totalSessions,
-      chatSessions,
-      voiceSessions,
-      fallbackLogsCount,
-      totalLogsCount,
-      logAggregate,
       sessionAggregate,
-      latencyAggregate,
+      sessionChannelCounts,
+      fallbackLogsCount,
+      logAggregate,
       logsForModels,
       timeseriesLogs
     ] = await Promise.all([
-      prisma.visitorSession.count({ where: sessionWhere }),
-      prisma.visitorSession.count({ where: { ...sessionWhere, channel: 'chat' } }),
-      prisma.visitorSession.count({ where: { ...sessionWhere, channel: 'voice' } }),
-      prisma.aiLog.count({ where: { ...logWhere, fallbackTriggered: true } }),
-      prisma.aiLog.count({ where: logWhere }),
-      prisma.aiLog.aggregate({
-        where: logWhere,
-        _sum: { estimatedCost: true, promptTokens: true, completionTokens: true }
-      }),
       prisma.visitorSession.aggregate({
         where: sessionWhere,
+        _count: { id: true },
         _sum: { estimatedCost: true, totalInputTokens: true, totalOutputTokens: true }
       }),
+      prisma.visitorSession.groupBy({
+        by: ['channel'],
+        where: sessionWhere,
+        _count: { id: true }
+      }),
+      prisma.aiLog.count({ where: { ...logWhere, fallbackTriggered: true } }),
       prisma.aiLog.aggregate({
         where: logWhere,
-        _avg: { latencyMs: true }
+        _count: { id: true },
+        _avg: { latencyMs: true },
+        _sum: { estimatedCost: true, promptTokens: true, completionTokens: true }
       }),
       prisma.aiLog.groupBy({
         by: ['modelUsed'],
@@ -97,6 +93,11 @@ export default async function analyticsRoutes(fastify: FastifyInstance, options:
       })
     ]);
 
+    const totalSessions = sessionAggregate._count.id || 0;
+    const chatSessions = sessionChannelCounts.find(c => c.channel === 'chat')?._count.id || 0;
+    const voiceSessions = sessionChannelCounts.find(c => c.channel === 'voice')?._count.id || 0;
+    const totalLogsCount = logAggregate._count.id || 0;
+
     // Fallback rate calculation
     const fallbackRate = totalLogsCount > 0 ? Math.round((fallbackLogsCount / totalLogsCount) * 1000) / 10 : 0;
     
@@ -106,7 +107,7 @@ export default async function analyticsRoutes(fastify: FastifyInstance, options:
     const totalTokens = promptTokens + completionTokens;
     
     const totalCost = (sessionAggregate._sum.estimatedCost || 0) || (logAggregate._sum.estimatedCost || 0);
-    const avgLatencyMs = Math.round(latencyAggregate._avg.latencyMs || 0);
+    const avgLatencyMs = Math.round(logAggregate._avg.latencyMs || 0);
 
     // Format model breakdown
     const modelBreakdown = logsForModels.map(m => ({
@@ -207,23 +208,33 @@ export default async function analyticsRoutes(fastify: FastifyInstance, options:
     const query = request.query as any;
     const { sessionWhere, logWhere, whereTenant } = buildWhereConditions(user, query);
 
-    const agents = await prisma.agent.findMany({
-      where: whereTenant,
-      select: { id: true, name: true, voice: true, isActive: true }
-    });
+    const [agents, sessionGroups, logGroups] = await Promise.all([
+      prisma.agent.findMany({
+        where: whereTenant,
+        select: { id: true, name: true, voice: true, isActive: true }
+      }),
+      prisma.visitorSession.groupBy({
+        by: ['aiAgentId'],
+        where: { ...sessionWhere, aiAgentId: { not: null } },
+        _count: { id: true }
+      }),
+      prisma.aiLog.groupBy({
+        by: ['agentId'],
+        where: { ...logWhere, agentId: { not: null } },
+        _avg: { latencyMs: true },
+        _sum: { estimatedCost: true, promptTokens: true, completionTokens: true }
+      })
+    ]);
 
-    const agentStats = await Promise.all(agents.map(async (agent) => {
-      const [sessionCount, logStats] = await Promise.all([
-        prisma.visitorSession.count({ where: { ...sessionWhere, aiAgentId: agent.id } }),
-        prisma.aiLog.aggregate({
-          where: { ...logWhere, agentId: agent.id },
-          _avg: { latencyMs: true },
-          _sum: { estimatedCost: true, promptTokens: true, completionTokens: true }
-        })
-      ]);
+    const sessionMap = new Map(sessionGroups.map(g => [g.aiAgentId, g._count.id]));
+    const logMap = new Map(logGroups.map(g => [g.agentId, g]));
 
-      const promptTokens = logStats._sum.promptTokens || 0;
-      const completionTokens = logStats._sum.completionTokens || 0;
+    const agentStats = agents.map((agent) => {
+      const sessionCount = sessionMap.get(agent.id) || 0;
+      const logStats = logMap.get(agent.id);
+
+      const promptTokens = logStats?._sum.promptTokens || 0;
+      const completionTokens = logStats?._sum.completionTokens || 0;
 
       return {
         id: agent.id,
@@ -234,10 +245,10 @@ export default async function analyticsRoutes(fastify: FastifyInstance, options:
         promptTokens,
         completionTokens,
         totalTokens: promptTokens + completionTokens,
-        avgLatencyMs: Math.round(logStats._avg.latencyMs || 0),
-        totalCost: Math.round((logStats._sum.estimatedCost || 0) * 1000000) / 1000000
+        avgLatencyMs: Math.round(logStats?._avg?.latencyMs || 0),
+        totalCost: Math.round((logStats?._sum?.estimatedCost || 0) * 1000000) / 1000000
       };
-    }));
+    });
 
     return {
       status: 'success',
