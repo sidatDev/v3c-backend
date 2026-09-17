@@ -585,6 +585,7 @@ Return ONLY a valid JSON array of strings, for example:
       publicKey?: string;
       slug?: string;
       language?: string;
+      voice?: string;
     };
 
     VoiceService.handleRealtimeSession(socket, query);

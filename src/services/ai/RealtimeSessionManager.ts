@@ -64,6 +64,7 @@ export interface VoiceSessionParams {
   slug?: string;
   language?: string;
   clientIp?: string;
+  voice?: string;
 }
 
 export class RealtimeSessionManager {
@@ -110,6 +111,7 @@ export class RealtimeSessionManager {
   private agentId?: string;
   private publicKey?: string;
   private slug?: string;
+  private requestedVoice?: string;
 
   constructor(params: VoiceSessionParams) {
     this.socket = params.socket;
@@ -119,6 +121,7 @@ export class RealtimeSessionManager {
     this.slug = params.slug;
     this.language = params.language === 'ur' ? 'Urdu' : 'English';
     this.clientIp = params.clientIp || '127.0.0.1';
+    this.requestedVoice = params.voice;
   }
 
   private sendResponseCreate(payload: any) {
@@ -256,9 +259,9 @@ export class RealtimeSessionManager {
     const minTranscriptLength = typeof vSettings.minTranscriptLength === 'number' ? vSettings.minTranscriptLength : 3;
     const minWordCount = typeof vSettings.minWordCount === 'number' ? vSettings.minWordCount : 2;
 
-    const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
-    const rawVoice = (agent.voice || 'shimmer').toLowerCase();
-    this.selectedVoice = validVoices.includes(rawVoice) ? rawVoice : 'shimmer';
+    const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar', 'onyx'];
+    const rawVoice = (this.requestedVoice || agent.voice || 'onyx').toLowerCase();
+    this.selectedVoice = validVoices.includes(rawVoice) ? rawVoice : 'onyx';
 
     console.log(`\n[SESSION LIFECYCLE ${ts()}] ▶ Session START`);
     console.log(`  Tenant     : ${agent.name} (${tenantId})`);
@@ -356,13 +359,18 @@ export class RealtimeSessionManager {
         if (!this.greetingSent) {
           this.greetingSent = true;
           const isUrdu = this.language === 'Urdu';
-          const agentName = this.tenantConfig?.agent.name || 'EFU General Insurance';
-          const greetingText = isUrdu
-            ? `سلام! میں ${agentName} کی خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتی ہوں؟`
-            : `Hello! I am the AI Virtual Support Assistant for ${agentName}. How may I assist you today?`;
+          const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+          const isFemale = femaleVoices.includes(this.selectedVoice.toLowerCase());
+          const agentName = this.tenantConfig?.agent.name || 'Sidat';
+          const configuredGreeting = this.tenantConfig?.agent.initialGreetingMessage;
+          const greetingText = configuredGreeting || (isUrdu
+            ? (isFemale
+                ? `سلام! میں ${agentName} کی خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتی ہوں؟`
+                : `سلام! میں ${agentName} کا خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتا ہوں؟`)
+            : `Hello! I am the AI Virtual Support Assistant for ${agentName}. How may I assist you today?`);
 
           const langDirective = isUrdu
-            ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+            ? (isFemale ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
             : `[RESPOND 100% IN ENGLISH]`;
 
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [INITIAL GREETING]`);
