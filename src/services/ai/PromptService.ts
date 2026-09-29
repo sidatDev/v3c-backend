@@ -8,6 +8,7 @@ export interface PromptBuildParams {
   currentMessage?: string;
   language?: string;
   isVoice?: boolean;
+  voice?: string;
 }
 
 export class PromptService {
@@ -15,12 +16,13 @@ export class PromptService {
    * Constructs the unified system prompt & messages array for AI completion/orchestration
    */
   static buildSystemPrompt(params: PromptBuildParams): string {
-    const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false } = params;
+    const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false, voice } = params;
     const { agent, personaPrompt, guardrailsPrompt } = tenantConfig;
 
+    const rawVoiceParam = voice || agent.voice || 'cedar';
+    const voiceClean = rawVoiceParam.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
     const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
-    const selectedVoiceLower = (agent.voice || 'shimmer').toLowerCase();
-    const isFemaleVoice = femaleVoices.includes(selectedVoiceLower);
+    const isFemaleVoice = femaleVoices.includes(voiceClean);
 
     let langInstruction = '';
     if (agent.autoLanguageDetection) {
@@ -37,8 +39,8 @@ export class PromptService {
     }
 
     const genderInstruction = isFemaleVoice
-      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs and agreement (e.g. use "samajhtee hoon", "samajhti hoon", "saktee hoon", "karr saktee hoon", "rahee hoon", "karti hoon"). NEVER use male grammatical gender endings like "samajhta hoon", "sakta hoon", "karta hoon", or "raha hoon".'
-      : 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, use male first-person grammatical verbs and agreement (e.g. use "samajhta hoon", "sakta hoon", "karta hoon", "raha hoon").';
+      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs and agreement (e.g. use "samajhtee hoon", "samajhti hoon", "saktee hoon", "karr saktee hoon", "rahee hoon", "karti hoon", "سکتی ہوں"). NEVER use male grammatical gender endings like "samajhta hoon", "sakta hoon", "karta hoon", or "raha hoon".'
+      : 'CRITICAL GENDER GRAMMAR RULE (URDU/HINDI): You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use male first-person grammatical verbs and agreement (e.g. use "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "sakta hoon", "karta hoon", "raha hoon"). NEVER use female grammatical gender endings like "saktee hoon", "karti hoon", "سکتی ہوں", or "کرتی ہوں".';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
     const capTokens = (text: string, maxTokens: number): string => {

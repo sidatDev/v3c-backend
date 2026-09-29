@@ -260,8 +260,9 @@ export class RealtimeSessionManager {
     const minWordCount = typeof vSettings.minWordCount === 'number' ? vSettings.minWordCount : 2;
 
     const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar', 'onyx'];
-    const rawVoice = (this.requestedVoice || agent.voice || 'onyx').toLowerCase();
-    this.selectedVoice = validVoices.includes(rawVoice) ? rawVoice : 'onyx';
+    const rawVoice = (this.requestedVoice || agent.voice || 'cedar').toLowerCase();
+    const voiceClean = rawVoice.split(' ')[0].replace(/[^a-z]/g, '');
+    this.selectedVoice = validVoices.includes(voiceClean) ? voiceClean : (validVoices.includes(rawVoice) ? rawVoice : 'cedar');
 
     console.log(`\n[SESSION LIFECYCLE ${ts()}] ▶ Session START`);
     console.log(`  Tenant     : ${agent.name} (${tenantId})`);
@@ -273,6 +274,7 @@ export class RealtimeSessionManager {
       tenantConfig: this.tenantConfig,
       language: this.language,
       isVoice: true,
+      voice: this.selectedVoice,
     });
 
     // ── Open OpenAI Realtime WebSocket ───────────────────────────────────────
@@ -360,7 +362,8 @@ export class RealtimeSessionManager {
           this.greetingSent = true;
           const isUrdu = this.language === 'Urdu';
           const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
-          const isFemale = femaleVoices.includes(this.selectedVoice.toLowerCase());
+          const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+          const isFemale = femaleVoices.includes(voiceClean);
           const agentName = this.tenantConfig?.agent.name || 'Sidat';
           const configuredGreeting = this.tenantConfig?.agent.initialGreetingMessage;
           const greetingText = configuredGreeting || (isUrdu
