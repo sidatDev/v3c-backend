@@ -591,6 +591,16 @@ export class RealtimeSessionManager {
           });
         }
 
+        const vSettings = (this.tenantConfig?.agent?.voiceSettings as any) || {};
+        let isFemaleVoiceTurn = false;
+        if (vSettings.gender) {
+          isFemaleVoiceTurn = vSettings.gender.toLowerCase() === 'female';
+        } else {
+          const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+          const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+          isFemaleVoiceTurn = femaleVoices.includes(voiceClean);
+        }
+
         // ── Intent Path A: Conversational Greetings & Affirmations ──────────
         const isGreeting = isConversationalGreeting(userSpeech);
         const isAffirmation = isConversationalAffirmation(userSpeech);
@@ -598,7 +608,7 @@ export class RealtimeSessionManager {
         if (isGreeting || isAffirmation) {
           const intentDecision = isGreeting ? 'CONVERSATIONAL_GREETING' : 'CONVERSATIONAL_AFFIRMATION';
           const greetingLangMandate = isUrdu
-            ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+            ? (isFemaleVoiceTurn ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
             : `[RESPOND 100% IN ENGLISH]`;
 
           this.lastUserTurn = userSpeech;
@@ -650,9 +660,9 @@ export class RealtimeSessionManager {
           await new Promise((r) => setTimeout(r, thinkingDelayMs));
         }
 
-        const agentName = this.tenantConfig.agent.name?.trim() || 'EFU General Insurance';
+        const agentName = this.tenantConfig.agent.name?.trim() || 'Sidat Technologies & Digital';
         const langGenderMandate = isUrdu
-          ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]`
+          ? (isFemaleVoiceTurn ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
           : `[RESPOND 100% IN ENGLISH]`;
 
         const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
