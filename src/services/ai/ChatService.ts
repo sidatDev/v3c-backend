@@ -145,7 +145,8 @@ export class ChatService {
       summary,
       recentMessages,
       currentMessage: message,
-      language
+      language,
+      voice: agent.voice
     });
 
     // Execute AI Completion via AiGateway

@@ -361,9 +361,15 @@ export class RealtimeSessionManager {
         if (!this.greetingSent) {
           this.greetingSent = true;
           const isUrdu = this.language === 'Urdu';
-          const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
-          const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
-          const isFemale = femaleVoices.includes(voiceClean);
+          const vSettings = (this.tenantConfig?.agent?.voiceSettings as any) || {};
+          let isFemale = false;
+          if (vSettings.gender) {
+            isFemale = vSettings.gender.toLowerCase() === 'female';
+          } else {
+            const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+            const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+            isFemale = femaleVoices.includes(voiceClean);
+          }
           const agentName = this.tenantConfig?.agent.name || 'Sidat';
           const configuredGreeting = this.tenantConfig?.agent.initialGreetingMessage;
           const greetingText = configuredGreeting || (isUrdu

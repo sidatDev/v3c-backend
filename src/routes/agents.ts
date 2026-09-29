@@ -134,6 +134,12 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
       throw new AppError('Agent not found', 404);
     }
 
+    const updatedVoiceSettings = body.voiceSettings !== undefined 
+      ? body.voiceSettings 
+      : (body.gender !== undefined 
+          ? { ...((existing.voiceSettings as object) || {}), gender: body.gender } 
+          : existing.voiceSettings);
+
     const updated = await prisma.agent.update({
       where: { id },
       data: {
@@ -151,7 +157,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         voiceWarmth: body.voiceWarmth !== undefined ? Number(body.voiceWarmth) : existing.voiceWarmth,
         autoLanguageDetection: body.autoLanguageDetection !== undefined ? Boolean(body.autoLanguageDetection) : existing.autoLanguageDetection,
         supportedLanguages: body.supportedLanguages !== undefined ? body.supportedLanguages : existing.supportedLanguages,
-        voiceSettings: body.voiceSettings !== undefined ? body.voiceSettings : existing.voiceSettings,
+        voiceSettings: updatedVoiceSettings,
         isActive: body.isActive !== undefined ? Boolean(body.isActive) : existing.isActive,
         updatedAt: new Date()
       }
