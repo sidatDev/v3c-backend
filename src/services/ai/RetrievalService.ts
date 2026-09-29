@@ -101,15 +101,13 @@ export class RetrievalService {
       });
     }
 
-    const fallbackTriggered = chunks.length === 0;
-
     // Fallback or Additional KB inclusion: If vector search returned 0 results or low results
-    if (fallbackTriggered || chunks.length < topK) {
+    if (chunks.length < topK) {
       try {
         const kbEntries = await prisma.knowledgeBaseEntry.findMany({
           where: { tenantId, enabled: true },
           orderBy: { createdAt: 'desc' },
-          take: 10
+          take: 15
         });
 
         for (const entry of kbEntries) {
@@ -133,6 +131,8 @@ export class RetrievalService {
         });
       }
     }
+
+    const fallbackTriggered = chunks.length === 0;
 
     const contextText = chunks.map(c => `[SOURCE: ${c.sourceTitle || 'Knowledge Base'}]\n${c.content}`).join('\n\n---\n\n');
     const sources = Array.from(sourcesMap.values());

@@ -146,7 +146,7 @@ export class ConversationService {
         messages: [
           {
             role: 'system',
-            content: 'Summarize the following customer service conversation history in 2-3 concise sentences focusing on key facts and user intent.'
+            content: 'talk to me in arabic'
           },
           { role: 'user', content: formatted }
         ],
