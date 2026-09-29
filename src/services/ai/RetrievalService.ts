@@ -103,19 +103,27 @@ export class RetrievalService {
 
     const fallbackTriggered = chunks.length === 0;
 
-    // Fallback: If vector search returned 0 results matching similarity threshold
-    if (fallbackTriggered) {
+    // Fallback or Additional KB inclusion: If vector search returned 0 results or low results
+    if (fallbackTriggered || chunks.length < topK) {
       try {
         const kbEntries = await prisma.knowledgeBaseEntry.findMany({
           where: { tenantId, enabled: true },
           orderBy: { createdAt: 'desc' },
-          take: 3
+          take: 10
         });
 
         for (const entry of kbEntries) {
           if (entry.content && entry.content.trim()) {
-            const title = entry.fileName || 'Knowledge Base Entry';
-            sourcesMap.set(title, { title });
+            const title = entry.fileName || 'Custom Knowledge Snippet';
+            const alreadyPushed = chunks.some(c => c.content === entry.content);
+            if (!alreadyPushed) {
+              chunks.push({
+                content: entry.content,
+                similarity: 0.8,
+                sourceTitle: title
+              });
+              sourcesMap.set(title, { title });
+            }
           }
         }
       } catch (err: any) {

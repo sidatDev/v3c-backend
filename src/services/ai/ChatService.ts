@@ -118,8 +118,8 @@ export class ChatService {
       }
     }
 
-    const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
-    const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(message);
+    const SERVICE_KEYWORDS = /\b(service|services|product|products|ai|solution|solutions|sprintly|talentra|humora|v3c|development|web|mobile|app|marketing|bpo|design|software|consulting|price|cost|about|contact|support|معلومات|خدمات|پروڈکٹ|حل|سافٹ ویئر|ایپ|ویب)\b/i;
+    const hasServiceKeyword = SERVICE_KEYWORDS.test(message);
 
     const isFollowUp = recentMessages.length > 0 && (
       message.split(/\s+/).length < 7 || 
@@ -127,13 +127,11 @@ export class ChatService {
     );
 
     let contextDirective: string;
-    if (retrievalResult.fallbackTriggered) {
-      if (isFollowUp || hasInsuranceKeyword) {
-        contextDirective = hasInsuranceKeyword && !isFollowUp
-          ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agent.name} insurance services but no exact knowledge base chunk matched. Answer the query naturally and helpfully in ${language} using your knowledge of ${agent.name} products. If you don't have specific details, offer to connect them with official ${agent.name} support channels.`
-          : `[TURN DIRECTIVE]: Answer the user's follow-up query naturally and accurately in ${language} using recent conversation history regarding ${agent.name} services.`;
+    if (retrievalResult.fallbackTriggered && !retrievalResult.contextText) {
+      if (isFollowUp || hasServiceKeyword) {
+        contextDirective = `[QUERY — GENERAL ASSISTANCE]: Answer the user's query naturally and accurately in ${language} regarding ${agent.name} products, services, and solutions.`;
       } else {
-        contextDirective = `[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is NOT related to insurance. You MUST politely refuse in ${language}. State clearly that you are the AI assistant for ${agent.name} and can only assist with ${agent.name} insurance services. Under NO circumstances provide instructions, troubleshooting, or general knowledge for non-insurance topics.`;
+        contextDirective = `[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is unrelated to ${agent.name}'s services. You MUST politely refuse in ${language}. State clearly that you are the AI assistant for ${agent.name} and can only assist with ${agent.name}'s services, products, and business solutions.`;
       }
     } else {
       contextDirective = retrievalResult.contextText;
