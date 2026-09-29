@@ -157,7 +157,22 @@ export class ChatService {
       mode: 'chat'
     });
 
-    reply = completion.reply;
+    const vSettings = (agent.voiceSettings as any) || {};
+    const basePromptLower = (agent.systemPrompt || '').toLowerCase();
+    let isFemale = false;
+    if (vSettings.gender) {
+      isFemale = vSettings.gender.toLowerCase() === 'female';
+    } else if (basePromptLower.includes('female virtual assistant') || basePromptLower.includes('female assistant')) {
+      isFemale = true;
+    } else if (basePromptLower.includes('male virtual assistant') || basePromptLower.includes('male assistant')) {
+      isFemale = false;
+    } else {
+      const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin', 'nova'];
+      const voiceClean = (agent.voice || 'cedar').split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+      isFemale = femaleVoices.includes(voiceClean);
+    }
+
+    reply = PromptService.sanitizeGenderVerbs(completion.reply, isFemale);
 
     // Check Turn 18 (70% Early Warning Notice for Chat)
     if (recentMessages.length > 0) {

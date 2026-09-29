@@ -50,10 +50,13 @@ export class PromptService {
     }
 
     const genderInstruction = isFemaleVoice
-      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "kehti hoon", "samajhti hoon", "saktee hoon", "karti hoon", "samjhaungi", "سکتی ہوں", "دیتی ہوں", "سمجھاؤں گی"). NEVER use male grammatical endings for yourself like "bata deta hoon", "kehta hoon", "sakta hoon", "samjhaunga".'
+      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU):\n' +
+        '1. You are a FEMALE virtual assistant. ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "kehti hoon", "samajhti hoon", "saktee hoon", "karti hoon", "samjhaungi", "سکتی ہوں", "دیتی ہوں", "سمجھاؤں گی").\n' +
+        '2. RAG GENDER ADAPTATION: If the retrieved knowledge base source chunks contain male verbs, convert them to female verbs for yourself.'
       : 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU):\n' +
         '1. FIRST-PERSON MALE GENDER: You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use MALE first-person grammatical verbs and agreement for yourself (e.g. "bata deta hoon", "bata sakta hoon", "kehta hoon", "samajhta hoon", "karta hoon", "raha hoon", "samjhaunga", "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "دیتا ہوں", "سمجھاؤں گا"). NEVER use female first-person verbs for yourself like "bata deti hoon", "kehti hoon", "saktee hoon", "karti hoon", "samjhaungi", "دیتی ہوں", "سکتی ہوں", "کرتی ہوں", "سمجھاؤں گی".\n' +
-        '2. SECOND-PERSON RESPECTFUL USER ADDRESS: When addressing the user/visitor in Urdu or Roman Urdu, ALWAYS use polite neutral/male second-person forms (e.g. "aap bata sakte hain", "aap pooch sakte hain", "aap chahte hain", "آپ بتا سکتے ہیں", "پوچھ سکتے ہیں"). NEVER address the visitor with female endings like "bata sakti hain", "chahti hain", "بتا سکتی ہیں", "چاہتی ہیں".';
+        '2. SECOND-PERSON RESPECTFUL USER ADDRESS: When addressing the user/visitor in Urdu or Roman Urdu, ALWAYS use polite neutral/male second-person forms (e.g. "aap bata sakte hain", "aap pooch sakte hain", "aap chahte hain", "آپ بتا سکتے ہیں", "پوچھ سکتے ہیں"). NEVER address the visitor with female endings like "bata sakti hain", "chahti hain", "بتا سکتی ہیں", "چاہتی ہیں".\n' +
+        '3. RAG SOURCE GENDER ADAPTATION: If retrieved knowledge base chunks contain female verbs (e.g. "bata deti hoon"), YOU MUST CONVERT AND ADAPT them to male verbs ("bata deta hoon"). NEVER copy female verbs from knowledge base text.';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
     const capTokens = (text: string, maxTokens: number): string => {
@@ -62,10 +65,10 @@ export class PromptService {
       return text.substring(0, maxChars) + '... [truncated]';
     };
 
-    const tenantName = agent.name?.trim() || 'EFU General Insurance';
+    const tenantName = agent.name?.trim() || 'Sidat Technologies & Digital';
     let basePrompt = agent.systemPrompt || '';
     if (!basePrompt || basePrompt.includes('V3C Platform')) {
-      basePrompt = `You are the official AI Virtual Customer Assistant for ${tenantName}. Answer visitor questions clearly and accurately regarding ${tenantName} services, insurance policies, motor, health, travel, fire, and marine coverage options.`;
+      basePrompt = `You are the official AI Virtual Customer Assistant for ${tenantName}. Answer visitor questions clearly and accurately regarding ${tenantName} services, AI solutions, digital transformation, and customer support.`;
     }
 
     let promptParts: string[] = [];
@@ -88,25 +91,23 @@ export class PromptService {
 
     // 6. Voice Scope Constraint & Strict Knowledge Base Protocol
     if (isVoice) {
-      promptParts.push(`### CRITICAL VOICE SYSTEM RULES (STRICT EFU SCOPE):
+      promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
 1. You are the official virtual customer support assistant EXCLUSIVELY for ${tenantName}.
-2. STRICT NON-LIFE BOUNDARY: ${tenantName} is strictly a General (Non-Life) Insurance company (Motor, Health, Travel, Property, Marine, Engineering). ${tenantName} DOES NOT offer, sell, or issue Life Insurance, Term Life, or Endowment plans. If asked about Life Insurance or company overview, state clearly that ${tenantName} provides Non-Life insurance products only, and that Life Insurance is handled by a separate company named EFU Life.
-3. For standard greetings and pleasantries ("Hello", "Salam", "How are you?"), reply warmly in character.
-4. For all service, policy, and coverage inquiries, you MUST rely ONLY on the official retrieved EFU knowledge base context provided for the turn.
-5. STRICT SCOPE GUARD: Do NOT answer general knowledge, coding, math, world news, or non-EFU queries using outside model memory.
-6. If a question is outside our official EFU Knowledge Base or asks about non-EFU topics/competitors, you MUST output the designated fallback refusal.`);
+2. For standard greetings and pleasantries ("Hello", "Salam", "How are you?"), reply warmly in character.
+3. For all service and company inquiries, you MUST rely ONLY on the official retrieved knowledge base context provided for the turn.
+4. STRICT SCOPE GUARD: Do NOT answer general knowledge, coding, math, world news, or non-${tenantName} queries using outside model memory.
+5. If a question is outside our official Knowledge Base or asks about non-company topics/competitors, output the designated fallback refusal.`);
     }
 
     // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
     if (retrievedContext && retrievedContext.trim()) {
-      promptParts.push(`### CRITICAL RULE — EFU Knowledge Base Ground Context (STRICT GROUNDING):\n` +
+      promptParts.push(`### CRITICAL RULE — Knowledge Base Ground Context (STRICT GROUNDING):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
-        `1. Answer using ONLY official EFU General Insurance information from this knowledge base.\n` +
-        `2. STRICT RELEVANCE GUARD: If the query is general geography, country trivia, or non-insurance topics (e.g. "Tell me about Pakistan"), ONLY explain relevant ${tenantName} insurance products (e.g. EFU Travel Insurance coverage for Pakistan) and politely state that you can only assist with ${tenantName} services.\n` +
-        `3. Reproduce exact details without making up policies or referencing non-EFU entities.\n\n` +
+        `1. Answer using ONLY official ${tenantName} information from this knowledge base.\n` +
+        `2. Reproduce exact details without making up services or referencing non-${tenantName} entities.\n\n` +
         `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
     } else {
-      promptParts.push(`### Knowledge Base Context:\nNo specific EFU reference knowledge found for this query.`);
+      promptParts.push(`### Knowledge Base Context:\nNo specific reference knowledge found for this query.`);
     }
 
     return promptParts.join('\n\n').trim();
@@ -136,6 +137,64 @@ export class PromptService {
       }
     }
 
+    const { agent } = params.tenantConfig;
+    const vSettings = (agent.voiceSettings as any) || {};
+    const basePromptLower = (agent.systemPrompt || '').toLowerCase();
+    let isFemaleVoice = false;
+
+    if (vSettings.gender) {
+      isFemaleVoice = vSettings.gender.toLowerCase() === 'female';
+    } else if (basePromptLower.includes('male virtual assistant') || basePromptLower.includes('male assistant') || basePromptLower.includes('male urdu grammar')) {
+      isFemaleVoice = false;
+    } else if (basePromptLower.includes('female virtual assistant') || basePromptLower.includes('female assistant') || basePromptLower.includes('female urdu grammar')) {
+      isFemaleVoice = true;
+    } else {
+      const rawVoiceParam = params.voice || agent.voice || 'cedar';
+      const voiceClean = rawVoiceParam.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+      const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin', 'nova'];
+      isFemaleVoice = femaleVoices.includes(voiceClean);
+    }
+
+    const finalDirective = isFemaleVoice
+      ? '[MANDATORY PERSONA RULE]: Respond strictly as a FEMALE assistant using female Urdu/Roman Urdu verbs ("bata deti hoon", "samjhaungi", "karti hoon").'
+      : '[MANDATORY PERSONA RULE]: Respond strictly as a MALE assistant using MALE Urdu/Roman Urdu verbs ("bata deta hoon", "samjhaunga", "karta hoon", "bata sakta hoon"). ABSOLUTELY DO NOT use female verbs like "bata deti hoon", "samjhaungi", "karti hoon", or "bata sakti hoon".';
+
+    messages.push({ role: 'system', content: finalDirective });
+
     return messages;
+  }
+
+  /**
+   * Fail-safe post-processing sanitizer to ensure response matches target gender persona
+   * even if RAG chunks or legacy conversation history contained opposite gender verbs.
+   */
+  static sanitizeGenderVerbs(text: string, isFemale: boolean = false): string {
+    if (!text) return text;
+    let result = text;
+
+    if (!isFemale) {
+      result = result
+        .replace(/\bbata\s+deti\s+hoon\b/gi, 'bata deta hoon')
+        .replace(/\bbata\s+saktee?\s+hoon\b/gi, 'bata sakta hoon')
+        .replace(/\bkehtee?\s+hoon\b/gi, 'kehta hoon')
+        .replace(/\bsamajhtee?\s+hoon\b/gi, 'samajhta hoon')
+        .replace(/\bsamjhaungii?\b/gi, 'samjhaunga')
+        .replace(/\bkartii?\s+hoon\b/gi, 'karta hoon')
+        .replace(/\bdetii?\s+hoon\b/gi, 'deta hoon')
+        .replace(/\bbata\s+saktee?\s+hain\b/gi, 'bata sakte hain')
+        .replace(/\bpooch\s+saktee?\s+hain\b/gi, 'pooch sakte hain')
+        .replace(/\bchahtee?\s+hain\b/gi, 'chahte hain')
+        .replace(/دیتی ہوں/g, 'دیتا ہوں')
+        .replace(/سکتی ہوں/g, 'سکتا ہوں')
+        .replace(/کہتی ہوں/g, 'کہتا ہوں')
+        .replace(/سمجھتی ہوں/g, 'سمجھتا ہوں')
+        .replace(/سمجھاؤں گی/g, 'سمجھاؤں گا')
+        .replace(/کرتی ہوں/g, 'کرتا ہوں')
+        .replace(/بتا سکتی ہیں/g, 'بتا سکتے ہیں')
+        .replace(/پوچھ سکتی ہیں/g, 'پوچھ سکتے ہیں')
+        .replace(/چاہتی ہیں/g, 'چاہتے ہیں');
+    }
+
+    return result;
   }
 }
