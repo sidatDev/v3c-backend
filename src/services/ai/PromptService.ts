@@ -17,6 +17,7 @@ export class PromptService {
    */
   static buildSystemPrompt(params: PromptBuildParams): string {
     const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false, voice } = params;
+    const { agent, personaPrompt, guardrailsPrompt } = tenantConfig;
     const vSettings = (agent.voiceSettings as any) || {};
     const basePromptLower = (agent.systemPrompt || '').toLowerCase();
     let isFemaleVoice = false;
