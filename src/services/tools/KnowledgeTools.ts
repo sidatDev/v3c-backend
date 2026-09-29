@@ -61,6 +61,7 @@ export class KnowledgeTools {
 
       const agent = await prisma.agent.findFirst({
         where: { tenantId, isActive: true },
+        orderBy: { updatedAt: 'desc' },
         include: { RetrievalConfig: true }
       });
       const threshold = agent?.RetrievalConfig?.similarityThreshold ?? 0.3;

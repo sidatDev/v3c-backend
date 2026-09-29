@@ -60,7 +60,12 @@ export class TenantConfigCache {
 
     if (!agent && tenantId) {
       agent = await prisma.agent.findFirst({
+        where: { tenantId, isActive: true },
+        orderBy: { updatedAt: 'desc' },
+        include: { RetrievalConfig: true }
+      }) || await prisma.agent.findFirst({
         where: { tenantId },
+        orderBy: { updatedAt: 'desc' },
         include: { RetrievalConfig: true }
       });
     }
@@ -68,10 +73,12 @@ export class TenantConfigCache {
     // Fallback agent lookup if missing
     if (!agent) {
       agent = await prisma.agent.findFirst({
-        where: { name: { contains: 'V3C' } },
+        where: { name: { contains: 'V3C' }, isActive: true },
+        orderBy: { updatedAt: 'desc' },
         include: { RetrievalConfig: true }
       }) || await prisma.agent.findFirst({
         where: { isActive: true },
+        orderBy: { updatedAt: 'desc' },
         include: { RetrievalConfig: true }
       });
       if (agent) {

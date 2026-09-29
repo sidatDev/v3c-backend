@@ -56,7 +56,11 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
     }
 
     let agent = await prisma.agent.findFirst({
-      where: { tenantId }
+      where: { tenantId, isActive: true },
+      orderBy: { updatedAt: 'desc' }
+    }) || await prisma.agent.findFirst({
+      where: { tenantId },
+      orderBy: { updatedAt: 'desc' }
     });
 
     if (!agent) {

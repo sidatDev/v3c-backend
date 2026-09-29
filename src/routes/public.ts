@@ -50,16 +50,22 @@ export default async function publicRoutes(fastify: FastifyInstance, options: Fa
 
     if (!agent && tenantId) {
       agent = await prisma.agent.findFirst({
-        where: { tenantId }
+        where: { tenantId, isActive: true },
+        orderBy: { updatedAt: 'desc' }
+      }) || await prisma.agent.findFirst({
+        where: { tenantId },
+        orderBy: { updatedAt: 'desc' }
       });
     }
 
     // Fallback: If no tenantId/slug specified, pick V3C agent or active agent
     if (!agent) {
       agent = await prisma.agent.findFirst({
-        where: { name: { contains: 'V3C' } }
+        where: { name: { contains: 'V3C' }, isActive: true },
+        orderBy: { updatedAt: 'desc' }
       }) || await prisma.agent.findFirst({
-        where: { isActive: true }
+        where: { isActive: true },
+        orderBy: { updatedAt: 'desc' }
       });
       if (agent) {
         tenantId = agent.tenantId;
