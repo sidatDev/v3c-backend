@@ -51,12 +51,12 @@ export class PromptService {
 
     const genderInstruction = isFemaleVoice
       ? 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU):\n' +
-        '1. You are a FEMALE virtual assistant. ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "kehti hoon", "samajhti hoon", "saktee hoon", "karti hoon", "samjhaungi", "سکتی ہوں", "دیتی ہوں", "سمجھاؤں گی").\n' +
+        '1. You are a FEMALE virtual assistant. ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "bataati hoon", "kehti hoon", "samajhti hoon", "bata sakti hoon", "karti hoon", "samjhaungi", "سکتی ہوں", "دیتی ہوں", "سمجھاؤں گی").\n' +
         '2. RAG GENDER ADAPTATION: If the retrieved knowledge base source chunks contain male verbs, convert them to female verbs for yourself.'
       : 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU):\n' +
-        '1. FIRST-PERSON MALE GENDER: You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use MALE first-person grammatical verbs and agreement for yourself (e.g. "bata deta hoon", "bata sakta hoon", "kehta hoon", "samajhta hoon", "karta hoon", "raha hoon", "samjhaunga", "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "دیتا ہوں", "سمجھاؤں گا"). NEVER use female first-person verbs for yourself like "bata deti hoon", "kehti hoon", "saktee hoon", "karti hoon", "samjhaungi", "دیتی ہوں", "سکتی ہوں", "کرتی ہوں", "سمجھاؤں گی".\n' +
-        '2. SECOND-PERSON RESPECTFUL USER ADDRESS: When addressing the user/visitor in Urdu or Roman Urdu, ALWAYS use polite neutral/male second-person forms (e.g. "aap bata sakte hain", "aap pooch sakte hain", "aap chahte hain", "آپ بتا سکتے ہیں", "پوچھ سکتے ہیں"). NEVER address the visitor with female endings like "bata sakti hain", "chahti hain", "بتا سکتی ہیں", "چاہتی ہیں".\n' +
-        '3. RAG SOURCE GENDER ADAPTATION: If retrieved knowledge base chunks contain female verbs (e.g. "bata deti hoon"), YOU MUST CONVERT AND ADAPT them to male verbs ("bata deta hoon"). NEVER copy female verbs from knowledge base text.';
+        '1. FIRST-PERSON MALE GENDER: You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use MALE first-person grammatical verbs and agreement for yourself (e.g. "bata deta hoon", "bataata hoon", "bata sakta hoon", "kehta hoon", "samajhta hoon", "karta hoon", "raha hoon", "samjhaunga", "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "دیتا ہوں", "سمجھاؤں گا"). ABSOLUTELY NEVER use female first-person verbs for yourself such as "bataati hoon", "batati hoon", "bata deti hoon", "bata sakti hoon", "kehti hoon", "saktee hoon", "karti hoon", "samjhaungi", "دیتی ہوں", "بتاتی ہوں", "سکتی ہوں", "کرتی ہوں", "سمجھاؤں گی".\n' +
+        '2. SECOND-PERSON RESPECTFUL USER ADDRESS: When addressing the user/visitor in Urdu or Roman Urdu, ALWAYS use polite neutral/male second-person forms (e.g. "aap bata sakte hain", "aap pooch sakte hain", "aap chahte hain", "آپ بتا سکتے ہیں", "پوچھ سکتے ہیں"). NEVER address the visitor with female endings like "bata sakti hain", "bataati hain", "chahti hain", "بتا سکتی ہیں", "بتاتی ہیں", "چاہتی ہیں".\n' +
+        '3. RAG SOURCE GENDER ADAPTATION: If retrieved knowledge base chunks contain female verbs (e.g. "bata deti hoon", "bataati hoon"), YOU MUST CONVERT AND ADAPT them to male verbs ("bata deta hoon", "bataata hoon"). NEVER copy female verbs from knowledge base text.';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
     const capTokens = (text: string, maxTokens: number): string => {
@@ -174,23 +174,41 @@ export class PromptService {
 
     if (!isFemale) {
       result = result
+        .replace(/\b(bataati|bataatee|batati)\s+hoon\b/gi, 'bataata hoon')
+        .replace(/\b(bataati|bataatee|batati)\s+hain\b/gi, 'bataate hain')
         .replace(/\bbata\s+deti\s+hoon\b/gi, 'bata deta hoon')
-        .replace(/\bbata\s+saktee?\s+hoon\b/gi, 'bata sakta hoon')
-        .replace(/\bkehtee?\s+hoon\b/gi, 'kehta hoon')
-        .replace(/\bsamajhtee?\s+hoon\b/gi, 'samajhta hoon')
-        .replace(/\bsamjhaungii?\b/gi, 'samjhaunga')
-        .replace(/\bkartii?\s+hoon\b/gi, 'karta hoon')
-        .replace(/\bdetii?\s+hoon\b/gi, 'deta hoon')
-        .replace(/\bbata\s+saktee?\s+hain\b/gi, 'bata sakte hain')
-        .replace(/\bpooch\s+saktee?\s+hain\b/gi, 'pooch sakte hain')
+        .replace(/\bbata\s+(sakti|saktee|saktii)\s+hoon\b/gi, 'bata sakta hoon')
+        .replace(/\bbata\s+(sakti|saktee|saktii)\s+hain\b/gi, 'bata sakte hain')
+        .replace(/\b(kar|karr)\s+(sakti|saktee|saktii)\s+hoon\b/gi, 'kar sakta hoon')
+        .replace(/\b(kar|karr)\s+(sakti|saktee|saktii)\s+hain\b/gi, 'kar sakte hain')
+        .replace(/\b(sakti|saktee|saktii)\s+hoon\b/gi, 'sakta hoon')
+        .replace(/\b(sakti|saktee|saktii)\s+hain\b/gi, 'sakte hain')
+        .replace(/\b(kehti|kehtee|kehatii)\s+hoon\b/gi, 'kehta hoon')
+        .replace(/\b(samajhti|samajhtee)\s+hoon\b/gi, 'samajhta hoon')
+        .replace(/\b(samjhaungi|samjhaungii|samjhaoongi)\b/gi, 'samjhaunga')
+        .replace(/\b(bataungi|bataungii|bataoongi)\b/gi, 'bataunga')
+        .replace(/\b(karungi|karungii|karoongi)\b/gi, 'karunga')
+        .replace(/\b(doongi|doongii)\b/gi, 'doonga')
+        .replace(/\b(karti|kartee)\s+hoon\b/gi, 'karta hoon')
+        .replace(/\b(deti|detee)\s+hoon\b/gi, 'deta hoon')
+        .replace(/\bpooch\s+(saktee|sakti)\s+hain\b/gi, 'pooch sakte hain')
         .replace(/\bchahtee?\s+hain\b/gi, 'chahte hain')
-        .replace(/دیتی ہوں/g, 'دیتا ہوں')
+        .replace(/بتاتی ہوں/g, 'بتاتا ہوں')
+        .replace(/بتاتی ہیں/g, 'بتاتے ہیں')
+        .replace(/بتا سکتی ہوں/g, 'بتا سکتا ہوں')
+        .replace(/بتا سکتی ہیں/g, 'بتا سکتے ہیں')
+        .replace(/کر سکتی ہوں/g, 'کر سکتا ہوں')
+        .replace(/کر سکتی ہیں/g, 'کر سکتے ہیں')
         .replace(/سکتی ہوں/g, 'سکتا ہوں')
+        .replace(/سکتی ہیں/g, 'سکتے ہیں')
         .replace(/کہتی ہوں/g, 'کہتا ہوں')
         .replace(/سمجھتی ہوں/g, 'سمجھتا ہوں')
         .replace(/سمجھاؤں گی/g, 'سمجھاؤں گا')
+        .replace(/بتاؤں گی/g, 'بتاؤں گا')
+        .replace(/کروں گی/g, 'کروں گا')
+        .replace(/دوں گی/g, 'دوں گا')
         .replace(/کرتی ہوں/g, 'کرتا ہوں')
-        .replace(/بتا سکتی ہیں/g, 'بتا سکتے ہیں')
+        .replace(/دیتی ہوں/g, 'دیتا ہوں')
         .replace(/پوچھ سکتی ہیں/g, 'پوچھ سکتے ہیں')
         .replace(/چاہتی ہیں/g, 'چاہتے ہیں');
     }
