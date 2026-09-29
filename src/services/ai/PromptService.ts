@@ -18,13 +18,19 @@ export class PromptService {
   static buildSystemPrompt(params: PromptBuildParams): string {
     const { tenantConfig, retrievedContext, summary, language = 'en', isVoice = false, voice } = params;
     const vSettings = (agent.voiceSettings as any) || {};
+    const basePromptLower = (agent.systemPrompt || '').toLowerCase();
     let isFemaleVoice = false;
+
     if (vSettings.gender) {
       isFemaleVoice = vSettings.gender.toLowerCase() === 'female';
+    } else if (basePromptLower.includes('male virtual assistant') || basePromptLower.includes('male assistant') || basePromptLower.includes('male urdu grammar')) {
+      isFemaleVoice = false;
+    } else if (basePromptLower.includes('female virtual assistant') || basePromptLower.includes('female assistant') || basePromptLower.includes('female urdu grammar')) {
+      isFemaleVoice = true;
     } else {
       const rawVoiceParam = voice || agent.voice || 'cedar';
       const voiceClean = rawVoiceParam.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
-      const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+      const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin', 'nova'];
       isFemaleVoice = femaleVoices.includes(voiceClean);
     }
 
@@ -43,9 +49,9 @@ export class PromptService {
     }
 
     const genderInstruction = isFemaleVoice
-      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "kehti hoon", "samajhti hoon", "saktee hoon", "karti hoon", "سکتی ہوں", "دیتی ہوں"). NEVER use male grammatical endings for yourself like "bata deta hoon", "kehta hoon", "sakta hoon".'
+      ? 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU): You are a FEMALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use female first-person grammatical verbs for yourself (e.g. "bata deti hoon", "kehti hoon", "samajhti hoon", "saktee hoon", "karti hoon", "samjhaungi", "سکتی ہوں", "دیتی ہوں", "سمجھاؤں گی"). NEVER use male grammatical endings for yourself like "bata deta hoon", "kehta hoon", "sakta hoon", "samjhaunga".'
       : 'CRITICAL GENDER GRAMMAR RULE (URDU/ROMAN URDU):\n' +
-        '1. FIRST-PERSON MALE GENDER: You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use MALE first-person grammatical verbs and agreement for yourself (e.g. "bata deta hoon", "bata sakta hoon", "kehta hoon", "samajhta hoon", "karta hoon", "raha hoon", "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "دیتا ہوں"). NEVER use female first-person verbs for yourself like "bata deti hoon", "kehti hoon", "saktee hoon", "karti hoon", "دیتی ہوں", "سکتی ہوں", "کرتی ہوں".\n' +
+        '1. FIRST-PERSON MALE GENDER: You are a MALE virtual assistant. When communicating in Urdu or Roman Urdu, ALWAYS use MALE first-person grammatical verbs and agreement for yourself (e.g. "bata deta hoon", "bata sakta hoon", "kehta hoon", "samajhta hoon", "karta hoon", "raha hoon", "samjhaunga", "میں کر سکتا ہوں", "کرتا ہوں", "رہا ہوں", "سمجھتا ہوں", "دیتا ہوں", "سمجھاؤں گا"). NEVER use female first-person verbs for yourself like "bata deti hoon", "kehti hoon", "saktee hoon", "karti hoon", "samjhaungi", "دیتی ہوں", "سکتی ہوں", "کرتی ہوں", "سمجھاؤں گی".\n' +
         '2. SECOND-PERSON RESPECTFUL USER ADDRESS: When addressing the user/visitor in Urdu or Roman Urdu, ALWAYS use polite neutral/male second-person forms (e.g. "aap bata sakte hain", "aap pooch sakte hain", "aap chahte hain", "آپ بتا سکتے ہیں", "پوچھ سکتے ہیں"). NEVER address the visitor with female endings like "bata sakti hain", "chahti hain", "بتا سکتی ہیں", "چاہتی ہیں".';
 
     // Helper to truncate text to approximate token budget (1 token ~ 4 chars)
