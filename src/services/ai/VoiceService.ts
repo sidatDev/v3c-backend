@@ -5,7 +5,7 @@ export class VoiceService {
   /**
    * Handle incoming WebSocket realtime voice session
    */
-  static handleRealtimeSession(socket: WebSocket, query: { sessionId?: string; agentId?: string; publicKey?: string; slug?: string; language?: string; voice?: string }): void {
+  static handleRealtimeSession(socket: WebSocket, query: { sessionId?: string; agentId?: string; publicKey?: string; slug?: string; language?: string; voice?: string; interestedClientId?: string }): void {
     const params: VoiceSessionParams = {
       socket,
       sessionId: query.sessionId,
@@ -13,7 +13,8 @@ export class VoiceService {
       publicKey: query.publicKey,
       slug: query.slug,
       language: query.language,
-      voice: query.voice
+      voice: query.voice,
+      interestedClientId: query.interestedClientId
     };
 
     const manager = new RealtimeSessionManager(params);

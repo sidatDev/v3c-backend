@@ -39,6 +39,8 @@ const allowedOrigins: (string | RegExp)[] = [
   'http://127.0.0.1:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  'http://localhost:3002',
+  'http://172.27.144.1:3002',
   /\.vercel\.app$/,
   /\.sidattech\.com$/
 ];
@@ -82,11 +84,14 @@ app.addHook('onResponse', auditLoggerHook);
 
 import billingRoutes from './routes/billing';
 
+import leadsRoutes from './routes/leads';
+
 // 4. Register API Route Plugins
 app.register(authRoutes, { prefix: '/api/auth' });
 app.register(rolesRoutes, { prefix: '/api/roles' });
 app.register(dashboardRoutes, { prefix: '/api/dashboard' });
 app.register(conversationsRoutes, { prefix: '/api/conversations' });
+app.register(leadsRoutes, { prefix: '/api/leads' });
 app.register(widgetRoutes, { prefix: '/api/widget' });
 app.register(knowledgeBaseRoutes, { prefix: '/api/kb' });
 app.register(integrationsRoutes, { prefix: '/api/integrations' });

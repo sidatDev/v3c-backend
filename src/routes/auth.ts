@@ -159,6 +159,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     return {
       status: 'success',
       data: {
+        token,
         user: {
           id: result.user.id,
           name: result.user.name,
@@ -265,6 +266,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     return {
       status: 'success',
       data: {
+        token,
         user: {
           id: user.id,
           name: user.name,
@@ -314,6 +316,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     return {
       status: 'success',
       data: {
+        token,
         user: {
           id: user.id,
           name: user.name,

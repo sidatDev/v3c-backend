@@ -84,6 +84,7 @@ model Agent {
   VoipCall               VoipCall[]
   RetrievalConfig        RetrievalConfig?
   AgentTopicLink         AgentTopicLink[]
+  InterestedClient       InterestedClient[]
 
   @@index([domainId])
   @@index([phoneNumber])
@@ -139,17 +140,20 @@ model Conversation {
   visitorSessionId Int?
   tenantId         String?
   aiAgentId        String?
+  interestedClientId Int?
   Agent            Agent?          @relation(fields: [aiAgentId], references: [id])
   Domain           Domain?         @relation(fields: [domainId], references: [id])
   Lead             Lead            @relation(fields: [leadId], references: [id])
   Tenant           Tenant?         @relation(fields: [tenantId], references: [id])
   Visitor          Visitor?        @relation(fields: [visitorId], references: [id])
   VisitorSession   VisitorSession? @relation(fields: [visitorSessionId], references: [id])
+  InterestedClient InterestedClient? @relation(fields: [interestedClientId], references: [id])
 
   @@index([aiAgentId])
   @@index([createdAt])
   @@index([domainId])
   @@index([leadId])
+  @@index([interestedClientId])
   @@index([secureId])
   @@index([sender])
   @@index([tenantId])
@@ -255,6 +259,7 @@ model Domain {
   VisitorSession     VisitorSession[]
   VoipConfig         VoipConfig?
   WidgetConfig       WidgetConfig[]
+  InterestedClient   InterestedClient[]
 
   @@index([domain])
   @@index([expiryDate])
@@ -659,6 +664,8 @@ model Tenant {
   RetrievalConfig        RetrievalConfig[]
   AgentTopicLink         AgentTopicLink[]
   AiLog                  AiLog[]
+  InterestedClient       InterestedClient[]
+  PotentialClient        PotentialClient[]
 }
 
 model TenantLimit {
@@ -817,6 +824,7 @@ model VisitorSession {
   Visitor                Visitor                  @relation(fields: [visitorId], references: [id])
   VoipCall               VoipCall[]
   AiLog                  AiLog[]
+  InterestedClient       InterestedClient[]
 
   @@index([aiAgentId])
   @@index([domainId])
@@ -1048,5 +1056,49 @@ model AiLog {
   @@index([createdAt])
 }
 
+model InterestedClient {
+  id               Int               @id @default(autoincrement())
+  name             String
+  email            String?
+  phone            String?
+  message          String?
+  ipAddress        String?
+  tenantId         String
+  domainId         Int?
+  aiAgentId        String?
+  visitorId        Int?
+  visitorSessionId Int?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  Tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  Domain           Domain?           @relation(fields: [domainId], references: [id])
+  Agent            Agent?            @relation(fields: [aiAgentId], references: [id])
+  VisitorSession   VisitorSession?   @relation(fields: [visitorSessionId], references: [id])
+  PotentialClient  PotentialClient?
+  Conversation     Conversation[]
 
+  @@index([tenantId])
+  @@index([createdAt])
+  @@index([email])
+  @@index([phone])
+  @@index([visitorSessionId])
+}
 
+model PotentialClient {
+  id                 Int              @id @default(autoincrement())
+  interestedClientId Int              @unique
+  confidenceScore    Int              // 0 to 100
+  summary            String
+  reasoning          String?
+  keyIntents         String[]         @default([])
+  tenantId           String
+  evaluatedAt        DateTime         @default(now())
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  InterestedClient   InterestedClient @relation(fields: [interestedClientId], references: [id], onDelete: Cascade)
+  Tenant             Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([confidenceScore])
+  @@index([createdAt])
+}

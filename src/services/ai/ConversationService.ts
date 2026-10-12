@@ -20,13 +20,14 @@ export class ConversationService {
     summary: string | undefined;
     dbSession: any;
     leadId: number | null;
+    interestedClientId: number | null;
   }> {
     const dbSession = await prisma.visitorSession.findFirst({
-      where: { id: sessionId, tenantId }
+      where: { id: sessionId }
     });
 
     if (!dbSession) {
-      return { recentMessages: [], summary: undefined, dbSession: null, leadId: null };
+      return { recentMessages: [], summary: undefined, dbSession: null, leadId: null, interestedClientId: null };
     }
 
     // Find or create lead for tracking
@@ -39,7 +40,7 @@ export class ConversationService {
         lead = await prisma.lead.create({
           data: {
             name: 'Visitor Lead',
-            tenantId,
+            tenantId: dbSession.tenantId || tenantId,
             aiAgentId: dbSession.aiAgentId,
             visitorId: dbSession.visitorId,
             visitorSessionId: dbSession.id,
@@ -52,8 +53,15 @@ export class ConversationService {
       }
     }
 
+    // Locate linked InterestedClient if one exists for this session
+    const interestedClient = await prisma.interestedClient.findFirst({
+      where: { visitorSessionId: dbSession.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true }
+    });
+
     const conversations = await prisma.conversation.findMany({
-      where: { visitorSessionId: dbSession.id, tenantId },
+      where: { visitorSessionId: dbSession.id },
       orderBy: { createdAt: 'desc' },
       take: limit + 6 // fetch extra to detect if summarization needed
     });
@@ -94,7 +102,8 @@ export class ConversationService {
       recentMessages,
       summary,
       dbSession,
-      leadId: lead ? lead.id : null
+      leadId: lead ? lead.id : null,
+      interestedClientId: interestedClient ? interestedClient.id : null
     };
   }
 
@@ -107,12 +116,53 @@ export class ConversationService {
     sessionId?: number | null;
     visitorId?: number | null;
     leadId?: number | null;
+    interestedClientId?: number | null;
     sender: 'visitor' | 'ai';
     message: string;
   }): Promise<void> {
-    const { tenantId, agentId, sessionId, visitorId, leadId, sender, message } = params;
+    const { tenantId, agentId, sessionId, visitorId, sender, message } = params;
 
-    if (!sessionId || !leadId) return;
+    if (!sessionId) return;
+
+    let activeLeadId = params.leadId || null;
+    if (!activeLeadId) {
+      const existingLead = await prisma.lead.findFirst({
+        where: { visitorSessionId: sessionId },
+        select: { id: true }
+      });
+      if (existingLead) {
+        activeLeadId = existingLead.id;
+      } else {
+        try {
+          const autoLead = await prisma.lead.create({
+            data: {
+              name: 'Visitor Lead',
+              tenantId,
+              aiAgentId: agentId,
+              visitorId: visitorId || null,
+              visitorSessionId: sessionId,
+              status: 'new',
+              updatedAt: new Date()
+            }
+          });
+          activeLeadId = autoLead.id;
+        } catch (_) {}
+      }
+    }
+
+    if (!activeLeadId) return;
+
+    let targetClientId = params.interestedClientId || null;
+    if (!targetClientId) {
+      const client = await prisma.interestedClient.findFirst({
+        where: { visitorSessionId: sessionId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true }
+      });
+      if (client) {
+        targetClientId = client.id;
+      }
+    }
 
     try {
       await prisma.conversation.create({
@@ -123,9 +173,11 @@ export class ConversationService {
           visitorSessionId: sessionId,
           sender,
           message: message.trim(),
-          leadId
+          leadId: activeLeadId,
+          interestedClientId: targetClientId
         }
       });
+      console.log(`[ConversationService] Saved ${sender} message for session #${sessionId}, interestedClientId: ${targetClientId || 'none'}`);
     } catch (err: any) {
       StructuredLogger.error('[ConversationService] Failed to save conversation message', {
         tenantId,

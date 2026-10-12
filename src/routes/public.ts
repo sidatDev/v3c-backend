@@ -7,6 +7,7 @@ import { openai, generateEmbedding } from '../utils/openai';
 import { ChatService } from '../services/ai/ChatService';
 import { VoiceService } from '../services/ai/VoiceService';
 import { SecurityShieldService } from '../services/security/SecurityShieldService';
+import { LeadQualificationService } from '../services/ai/LeadQualificationService';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -382,13 +383,14 @@ ${snippets}`;
   // @route   POST /api/public/chat
   // @desc    Public text chat endpoint with RAG context & multi-language support
   fastify.post('/chat', async (request, reply) => {
-    const { sessionId, agentId, publicKey, slug, message, language = 'en' } = request.body as {
+    const { sessionId, agentId, publicKey, slug, message, language = 'en', interestedClientId } = request.body as {
       sessionId?: number;
       agentId?: string;
       publicKey?: string;
       slug?: string;
       message: string;
       language?: string;
+      interestedClientId?: number;
     };
 
     if (!message || message.trim() === '') {
@@ -401,8 +403,20 @@ ${snippets}`;
       publicKey,
       slug,
       message,
-      language
+      language,
+      interestedClientId: interestedClientId ? Number(interestedClientId) : undefined
     });
+
+    // Asynchronously trigger lead qualification in background after conversation turn
+    if (sessionId) {
+      LeadQualificationService.evaluateSession(
+        Number(sessionId),
+        undefined,
+        interestedClientId ? Number(interestedClientId) : undefined
+      ).catch(err => {
+        console.warn('[PublicChat] Background lead evaluation notice:', err?.message || err);
+      });
+    }
 
     return {
       status: 'success',
@@ -418,56 +432,104 @@ ${snippets}`;
   // @route   POST /api/public/lead
   // @desc    Submit visitor contact details (Lead capture)
   fastify.post('/lead', async (request, reply) => {
-    const { sessionId, agentId, publicKey, slug, name, email, phone } = request.body as {
-      sessionId?: number;
-      agentId?: string;
-      publicKey?: string;
-      slug?: string;
-      name: string;
-      email?: string;
-      phone?: string;
-    };
+    try {
+      const { sessionId, agentId, publicKey, slug, name, email, phone, message } = request.body as {
+        sessionId?: number;
+        agentId?: string;
+        publicKey?: string;
+        slug?: string;
+        name: string;
+        email?: string;
+        phone?: string;
+        message?: string;
+      };
 
-    if (!name || name.trim() === '') {
-      throw new AppError('Name is required for lead submission', 400);
-    }
+      console.log(`[PublicLead] Incoming lead submission: name="${name}", email="${email}", phone="${phone}", session="${sessionId}", slug="${slug}"`);
 
-    const { tenantId, agent } = await validatePublicAccess(publicKey, agentId, slug);
+      if (!name || name.trim() === '') {
+        throw new AppError('Name is required for lead submission', 400);
+      }
 
-    let visitorSessionId = null;
-    let visitorId = null;
+      const { tenantId, agent } = await validatePublicAccess(publicKey, agentId, slug);
 
-    if (sessionId) {
-      const dbSession = await prisma.visitorSession.findFirst({
-        where: { id: Number(sessionId), tenantId }
+      let visitorSessionId = null;
+      let visitorId = null;
+
+      if (sessionId) {
+        const dbSession = await prisma.visitorSession.findFirst({
+          where: { id: Number(sessionId) }
+        });
+        if (dbSession) {
+          visitorSessionId = dbSession.id;
+          visitorId = dbSession.visitorId;
+        } else {
+          console.warn(`[PublicLead] Session #${sessionId} provided but not found in DB`);
+        }
+      }
+
+      const ipAddress = (request.headers['cf-connecting-ip'] as string) ||
+                        (request.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+                        request.ip;
+
+      const lead = await prisma.lead.create({
+        data: {
+          name: name.trim(),
+          email: email ? email.trim() : null,
+          phone: phone ? phone.trim() : null,
+          tenantId,
+          aiAgentId: agent.id,
+          visitorId,
+          visitorSessionId,
+          status: 'new',
+          updatedAt: new Date()
+        }
       });
-      if (dbSession) {
-        visitorSessionId = dbSession.id;
-        visitorId = dbSession.visitorId;
+
+      const clientMessage = message ? message.trim() : ((request.body as any)?.message || null);
+
+      const interestedClient = await prisma.interestedClient.create({
+        data: {
+          name: name.trim(),
+          email: email ? email.trim() : null,
+          phone: phone ? phone.trim() : null,
+          message: clientMessage,
+          ipAddress,
+          tenantId,
+          domainId: (agent as any)?.domainId || null,
+          aiAgentId: agent.id,
+          visitorId,
+          visitorSessionId,
+        }
+      });
+
+      if (visitorSessionId) {
+        await prisma.conversation.updateMany({
+          where: { visitorSessionId },
+          data: { interestedClientId: interestedClient.id }
+        });
       }
+
+      console.log(`[PublicLead] Successfully saved InterestedClient #${interestedClient.id} (Lead #${lead.id}) for session #${visitorSessionId} in tenant ${tenantId}`);
+
+      // If an initial inquiry message was provided, trigger evaluation in background
+      if (visitorSessionId && clientMessage) {
+        LeadQualificationService.evaluateSession(visitorSessionId, tenantId, interestedClient.id).catch(evalErr => {
+          console.warn('[PublicLead] Initial lead evaluation notice:', evalErr?.message || evalErr);
+        });
+      }
+
+      return {
+        status: 'success',
+        data: {
+          leadId: lead.id,
+          interestedClientId: interestedClient.id,
+          message: 'Lead captured successfully'
+        }
+      };
+    } catch (err: any) {
+      console.error('[PublicLead] Error creating lead:', err);
+      throw err;
     }
-
-    const lead = await prisma.lead.create({
-      data: {
-        name: name.trim(),
-        email: email ? email.trim() : null,
-        phone: phone ? phone.trim() : null,
-        tenantId,
-        aiAgentId: agent.id,
-        visitorId,
-        visitorSessionId,
-        status: 'new',
-        updatedAt: new Date()
-      }
-    });
-
-    return {
-      status: 'success',
-      data: {
-        leadId: lead.id,
-        message: 'Lead captured successfully'
-      }
-    };
   });
 
   // @route   POST /api/public/quick-questions
@@ -553,6 +615,11 @@ Return ONLY a valid JSON array of strings, for example:
           updatedAt: now
         }
       });
+
+      // Trigger asynchronous Two-Tier AI lead qualification
+      LeadQualificationService.evaluateSession(session.id, session.tenantId || undefined).catch(err => {
+        console.error('[SessionEnd] Lead qualification trigger failed:', err?.message || err);
+      });
     }
 
     return {
@@ -592,6 +659,7 @@ Return ONLY a valid JSON array of strings, for example:
       slug?: string;
       language?: string;
       voice?: string;
+      interestedClientId?: string;
     };
 
     VoiceService.handleRealtimeSession(socket, query);

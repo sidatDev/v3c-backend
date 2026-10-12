@@ -8,6 +8,7 @@ import { SecurityShieldService } from '../security/SecurityShieldService';
 import { StructuredLogger } from '../logger/StructuredLogger';
 import { VoiceAuditLogger, VoiceAuditRecord } from '../logger/VoiceAuditLogger';
 import { AiLogService } from '../logger/AiLogService';
+import { LeadQualificationService } from './LeadQualificationService';
 import {
   isNoisyTranscript,
   normalizeHindiToUrdu,
@@ -65,6 +66,7 @@ export interface VoiceSessionParams {
   language?: string;
   clientIp?: string;
   voice?: string;
+  interestedClientId?: string;
 }
 
 export class RealtimeSessionManager {
@@ -75,6 +77,7 @@ export class RealtimeSessionManager {
   private sessionIdNum: number | null = null;
   private dbSession: any = null;
   private leadId: number | null = null;
+  private interestedClientId: number | null = null;
 
   // Client IP for concurrent session throttling
   private clientIp: string = '127.0.0.1';
@@ -122,6 +125,7 @@ export class RealtimeSessionManager {
     this.language = params.language === 'ur' ? 'Urdu' : 'English';
     this.clientIp = params.clientIp || '127.0.0.1';
     this.requestedVoice = params.voice;
+    this.interestedClientId = params.interestedClientId ? parseInt(params.interestedClientId, 10) : null;
   }
 
   private sendResponseCreate(payload: any) {
@@ -155,11 +159,27 @@ export class RealtimeSessionManager {
     }, 30 * 1000);
   }
 
+  private isCleanedUp: boolean = false;
+
   private cleanupTimers() {
+    if (this.isCleanedUp) return;
+    this.isCleanedUp = true;
+
     if (this.maxDurationTimer) { clearTimeout(this.maxDurationTimer); this.maxDurationTimer = null; }
     if (this.silenceTimeoutTimer) { clearTimeout(this.silenceTimeoutTimer); this.silenceTimeoutTimer = null; }
     if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
     SecurityShieldService.unregisterVoiceCallSession(this.clientIp, this);
+
+    if (this.sessionIdNum) {
+      console.log(`[RealtimeSessionManager] Socket/Session terminating — evaluating session #${this.sessionIdNum} (tenantId: ${this.tenantConfig?.tenantId || 'auto'}, interestedClientId: ${this.interestedClientId || 'none'})`);
+      LeadQualificationService.evaluateSession(
+        this.sessionIdNum,
+        this.tenantConfig?.tenantId,
+        this.interestedClientId || undefined
+      ).catch(err => {
+        console.error('[RealtimeSessionManager] Lead qualification evaluation error:', err);
+      });
+    }
   }
 
   private gracefulClose(reasonMessage: string) {
@@ -222,6 +242,9 @@ export class RealtimeSessionManager {
       const sessionCtx = await ConversationService.getSessionContext(this.sessionIdNum, tenantId);
       this.dbSession = sessionCtx.dbSession;
       this.leadId = sessionCtx.leadId;
+      if (!this.interestedClientId && sessionCtx.interestedClientId) {
+        this.interestedClientId = sessionCtx.interestedClientId;
+      }
 
       // Resume turn count for Session Re-hydration (prevents turn cap refresh bypass)
       if (sessionCtx.recentMessages && sessionCtx.recentMessages.length > 0) {
@@ -415,13 +438,14 @@ export class RealtimeSessionManager {
       }
 
       if (event.type === 'response.done') {
-        if (this.tenantConfig && this.sessionIdNum && this.leadId && this.aiTranscriptBuffer.trim()) {
+        if (this.tenantConfig && this.sessionIdNum && this.aiTranscriptBuffer.trim()) {
           await ConversationService.saveMessage({
             tenantId: this.tenantConfig.tenantId,
             agentId: this.tenantConfig.agent.id,
             sessionId: this.sessionIdNum,
             visitorId: this.dbSession?.visitorId,
             leadId: this.leadId,
+            interestedClientId: this.interestedClientId,
             sender: 'ai',
             message: this.aiTranscriptBuffer.trim(),
           });
@@ -579,13 +603,14 @@ export class RealtimeSessionManager {
         }
 
         // Save visitor turn to DB
-        if (this.sessionIdNum && this.leadId) {
+        if (this.sessionIdNum) {
           await ConversationService.saveMessage({
             tenantId: this.tenantConfig.tenantId,
             agentId: this.tenantConfig.agent.id,
             sessionId: this.sessionIdNum,
             visitorId: this.dbSession?.visitorId,
             leadId: this.leadId,
+            interestedClientId: this.interestedClientId,
             sender: 'visitor',
             message: userSpeech,
           });
@@ -706,10 +731,29 @@ export class RealtimeSessionManager {
     });
 
     // ── Cleanup & Closure Event Listeners ────────────────────────────────────
-    this.socket.on('close', () => {
+    this.socket.on('close', async () => {
       console.log(`[SESSION LIFECYCLE ${ts()}] Browser client DISCONNECTED`);
+      // Flush any pending AI transcript buffer before concluding session
+      if (this.tenantConfig && this.sessionIdNum && this.aiTranscriptBuffer.trim()) {
+        try {
+          await ConversationService.saveMessage({
+            tenantId: this.tenantConfig.tenantId,
+            agentId: this.tenantConfig.agent.id,
+            sessionId: this.sessionIdNum,
+            visitorId: this.dbSession?.visitorId,
+            leadId: this.leadId,
+            interestedClientId: this.interestedClientId,
+            sender: 'ai',
+            message: this.aiTranscriptBuffer.trim(),
+          });
+          console.log(`[RealtimeSessionManager] Flushed remaining AI transcript buffer (${this.aiTranscriptBuffer.length} chars) to Conversation`);
+          this.aiTranscriptBuffer = '';
+        } catch (saveErr) {
+          console.error('[RealtimeSessionManager] Failed to flush final aiTranscriptBuffer on close:', saveErr);
+        }
+      }
       this.cleanupTimers();
-      if (this.openAiWs && this.openAiWs.readyState !== WebSocket.OPEN) {
+      if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
         this.openAiWs.close();
       }
     });

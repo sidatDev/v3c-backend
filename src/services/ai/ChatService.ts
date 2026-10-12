@@ -13,6 +13,7 @@ export interface ChatMessageParams {
   slug?: string;
   message: string;
   language?: string;
+  interestedClientId?: number;
 }
 
 export class ChatService {
@@ -48,6 +49,7 @@ export class ChatService {
     // 3. Load Session Memory & Save Visitor Message
     let dbSession = null;
     let leadId: number | null = null;
+    let interestedClientId: number | null = params.interestedClientId || null;
     let recentMessages: any[] = [];
     let summary: string | undefined = undefined;
 
@@ -55,6 +57,9 @@ export class ChatService {
       const sessionCtx = await ConversationService.getSessionContext(sessionId, tenantId);
       dbSession = sessionCtx.dbSession;
       leadId = sessionCtx.leadId;
+      if (!interestedClientId) {
+        interestedClientId = sessionCtx.interestedClientId;
+      }
       recentMessages = sessionCtx.recentMessages;
       summary = sessionCtx.summary;
 
@@ -76,13 +81,14 @@ export class ChatService {
       }
 
       // Save visitor message to DB
-      if (dbSession && leadId) {
+      if (dbSession) {
         await ConversationService.saveMessage({
           tenantId,
           agentId: agent.id,
           sessionId: dbSession.id,
           visitorId: dbSession.visitorId,
           leadId,
+          interestedClientId,
           sender: 'visitor',
           message
         });
@@ -186,13 +192,14 @@ export class ChatService {
     }
 
     // 6. Save AI Reply to DB
-    if (dbSession && leadId) {
+    if (dbSession) {
       await ConversationService.saveMessage({
         tenantId,
         agentId: agent.id,
         sessionId: dbSession.id,
         visitorId: dbSession.visitorId,
         leadId,
+        interestedClientId,
         sender: 'ai',
         message: reply
       });
