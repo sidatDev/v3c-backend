@@ -15,7 +15,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
 
     const { page, limit, skip, sortBy, sortOrder, search } = parsePagination(request, 'createdAt', 'desc');
 
-    const whereCondition: any = {};
+    const whereCondition: any = { isDeleted: false };
 
     // Filter by tenant unless super_admin with no specific tenant filter
     if (!isSuperAdmin) {
@@ -38,7 +38,63 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       if (t) whereCondition.tenantId = t.id;
     }
 
-    if (search) {
+    // Field-specific filtering
+    if (query.client) {
+      whereCondition.OR = [
+        { name: { contains: query.client, mode: 'insensitive' } },
+        { email: { contains: query.client, mode: 'insensitive' } },
+        { phone: { contains: query.client, mode: 'insensitive' } },
+      ];
+    }
+
+    if (query.message) {
+      whereCondition.message = { contains: query.message, mode: 'insensitive' };
+    }
+
+    if (query.ip) {
+      whereCondition.OR = [
+        { ipAddress: { contains: query.ip, mode: 'insensitive' } },
+        { VisitorSession: { channel: { contains: query.ip, mode: 'insensitive' } } },
+      ];
+    }
+
+    if (query.status) {
+      const statusLower = query.status.toLowerCase().trim();
+      if (statusLower === 'qualified' || statusLower === 'qual') {
+        whereCondition.PotentialClient = { isNot: null, isDeleted: false };
+      } else if (statusLower === 'unqualified' || statusLower === 'in review' || statusLower === 'unqual') {
+        whereCondition.OR = [
+          { PotentialClient: null },
+          { PotentialClient: { isDeleted: true } }
+        ];
+      } else if (!isNaN(parseInt(statusLower, 10))) {
+        whereCondition.PotentialClient = {
+          isDeleted: false,
+          confidenceScore: { gte: parseInt(statusLower, 10) }
+        };
+      } else {
+        whereCondition.PotentialClient = {
+          isDeleted: false,
+          summary: { contains: query.status, mode: 'insensitive' }
+        };
+      }
+    }
+
+    if (query.startDate || query.endDate) {
+      whereCondition.createdAt = {};
+      if (query.startDate) {
+        whereCondition.createdAt.gte = new Date(query.startDate);
+      }
+      if (query.endDate) {
+        const end = new Date(query.endDate);
+        if (query.endDate.length <= 10) {
+          end.setHours(23, 59, 59, 999);
+        }
+        whereCondition.createdAt.lte = end;
+      }
+    }
+
+    if (search && !query.client && !query.message && !query.ip && !query.status) {
       whereCondition.OR = [
         { name: { contains: search, mode: 'insensitive' } },
         { email: { contains: search, mode: 'insensitive' } },
@@ -62,6 +118,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
               confidenceScore: true,
               summary: true,
               evaluatedAt: true,
+              isDeleted: true,
             }
           },
           VisitorSession: {
@@ -79,7 +136,12 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       })
     ]);
 
-    return formatPaginatedResponse(items, total, { page, limit });
+    const sanitizedItems = items.map(item => ({
+      ...item,
+      PotentialClient: item.PotentialClient?.isDeleted ? null : item.PotentialClient
+    }));
+
+    return formatPaginatedResponse(sanitizedItems, total, { page, limit });
   });
 
   // @route   GET /api/leads/potential
@@ -91,7 +153,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
 
     const { page, limit, skip, sortBy, sortOrder, search } = parsePagination(request, 'confidenceScore', 'desc');
 
-    const whereCondition: any = {};
+    const whereCondition: any = { isDeleted: false };
 
     if (!isSuperAdmin) {
       if (query.slug && query.slug !== 'all') {
@@ -113,13 +175,68 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       if (t) whereCondition.tenantId = t.id;
     }
 
-    if (search) {
+    // Base InterestedClient filter to ensure parent isn't soft-deleted
+    whereCondition.InterestedClient = { isDeleted: false };
+
+    // Field-specific filtering for potential leads
+    if (query.client) {
+      whereCondition.InterestedClient.OR = [
+        { name: { contains: query.client, mode: 'insensitive' } },
+        { email: { contains: query.client, mode: 'insensitive' } },
+        { phone: { contains: query.client, mode: 'insensitive' } },
+      ];
+    }
+
+    if (query.message) {
+      whereCondition.InterestedClient.message = { contains: query.message, mode: 'insensitive' };
+    }
+
+    if (query.ip) {
+      whereCondition.InterestedClient.OR = [
+        { ipAddress: { contains: query.ip, mode: 'insensitive' } },
+        { VisitorSession: { channel: { contains: query.ip, mode: 'insensitive' } } },
+      ];
+    }
+
+    if (query.status) {
+      const statusLower = query.status.toLowerCase().trim();
+      if (statusLower === 'high' || statusLower === 'high intent') {
+        whereCondition.confidenceScore = { gte: 80 };
+      } else if (statusLower === 'moderate' || statusLower === 'moderate intent') {
+        whereCondition.confidenceScore = { gte: 65, lt: 80 };
+      } else if (statusLower === 'warm' || statusLower === 'warm lead') {
+        whereCondition.confidenceScore = { lt: 65 };
+      } else if (!isNaN(parseInt(statusLower, 10))) {
+        whereCondition.confidenceScore = { gte: parseInt(statusLower, 10) };
+      } else {
+        whereCondition.OR = [
+          { summary: { contains: query.status, mode: 'insensitive' } },
+          { reasoning: { contains: query.status, mode: 'insensitive' } }
+        ];
+      }
+    }
+
+    if (query.startDate || query.endDate) {
+      whereCondition.createdAt = {};
+      if (query.startDate) {
+        whereCondition.createdAt.gte = new Date(query.startDate);
+      }
+      if (query.endDate) {
+        const end = new Date(query.endDate);
+        if (query.endDate.length <= 10) {
+          end.setHours(23, 59, 59, 999);
+        }
+        whereCondition.createdAt.lte = end;
+      }
+    }
+
+    if (search && !query.client && !query.message && !query.ip && !query.status) {
       whereCondition.OR = [
         { summary: { contains: search, mode: 'insensitive' } },
         { reasoning: { contains: search, mode: 'insensitive' } },
-        { InterestedClient: { name: { contains: search, mode: 'insensitive' } } },
-        { InterestedClient: { email: { contains: search, mode: 'insensitive' } } },
-        { InterestedClient: { phone: { contains: search, mode: 'insensitive' } } },
+        { InterestedClient: { isDeleted: false, name: { contains: search, mode: 'insensitive' } } },
+        { InterestedClient: { isDeleted: false, email: { contains: search, mode: 'insensitive' } } },
+        { InterestedClient: { isDeleted: false, phone: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
@@ -167,7 +284,9 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
     }
 
     const client = await prisma.interestedClient.findFirst({
-      where: isSuperAdmin ? { id: clientId } : { id: clientId, ...(user.tenantId ? { tenantId: user.tenantId } : {}) },
+      where: isSuperAdmin
+        ? { id: clientId, isDeleted: false }
+        : { id: clientId, isDeleted: false, ...(user.tenantId ? { tenantId: user.tenantId } : {}) },
       include: {
         PotentialClient: true,
         VisitorSession: true,
@@ -176,6 +295,11 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
 
     if (!client) {
       throw new AppError('Client not found', 404);
+    }
+
+    // Hide PotentialClient if soft-deleted
+    if (client.PotentialClient?.isDeleted) {
+      (client as any).PotentialClient = null;
     }
 
     // Query messages linked directly to interestedClientId OR through visitorSessionId
@@ -205,7 +329,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   });
 
   // @route   DELETE /api/leads/interested/:id
-  // @desc    Delete an Interested Client and its associated PotentialClient qualification
+  // @desc    Soft delete an Interested Client and cascade to associated PotentialClient
   fastify.delete('/interested/:id', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
     const isSuperAdmin = user.role === 'super_admin';
@@ -216,7 +340,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Invalid client ID', 400);
     }
 
-    const whereCondition: any = { id: clientId };
+    const whereCondition: any = { id: clientId, isDeleted: false };
     if (!isSuperAdmin) {
       if (!user.tenantId) {
         throw new AppError('Tenant unauthorized', 403);
@@ -233,20 +357,16 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
     }
 
     await prisma.$transaction(async (tx) => {
-      // Unlink conversations so no foreign key constraint prevents deletion
-      await tx.conversation.updateMany({
-        where: { interestedClientId: clientId },
-        data: { interestedClientId: null }
+      // Soft-delete associated PotentialClient
+      await tx.potentialClient.updateMany({
+        where: { interestedClientId: clientId, isDeleted: false },
+        data: { isDeleted: true }
       });
 
-      // Delete associated PotentialClient
-      await tx.potentialClient.deleteMany({
-        where: { interestedClientId: clientId }
-      });
-
-      // Delete the InterestedClient record
-      await tx.interestedClient.delete({
-        where: { id: clientId }
+      // Soft-delete the InterestedClient record
+      await tx.interestedClient.update({
+        where: { id: clientId },
+        data: { isDeleted: true }
       });
     });
 
@@ -258,7 +378,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   });
 
   // @route   DELETE /api/leads/potential/:id
-  // @desc    Delete a Potential Client qualification record
+  // @desc    Soft delete a Potential Client qualification record
   fastify.delete('/potential/:id', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
     const isSuperAdmin = user.role === 'super_admin';
@@ -269,7 +389,7 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Invalid potential client ID', 400);
     }
 
-    const whereCondition: any = { id: potentialClientId };
+    const whereCondition: any = { id: potentialClientId, isDeleted: false };
     if (!isSuperAdmin) {
       if (!user.tenantId) {
         throw new AppError('Tenant unauthorized', 403);
@@ -285,8 +405,9 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Potential client record not found or access denied', 404);
     }
 
-    await prisma.potentialClient.delete({
-      where: { id: potentialClientId }
+    await prisma.potentialClient.update({
+      where: { id: potentialClientId },
+      data: { isDeleted: true }
     });
 
     return {

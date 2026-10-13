@@ -154,40 +154,50 @@ export function normalizeHindiToUrdu(text: string): string {
  * Determines the dominant language of a user utterance using token majority rule.
  */
 export function detectDominantLanguage(text: string): 'English' | 'Urdu' | 'RomanUrdu' {
-  if (!text || text.trim().length === 0) return 'English';
+  if (!text || text.trim().length === 0) return 'Urdu';
 
   const trimmed = text.trim();
-  const latinWords = (trimmed.match(/\b[a-zA-Z]{2,}\b/g) || []).length;
-  const urduWords = (trimmed.match(/[\u0600-\u06FF]+/g) || []).length;
 
-  // If sentence has majority Latin/English words (e.g. "services do you provide"), classify as English
-  if (latinWords > urduWords) {
-    return 'English';
+  // Any transcript containing Tamil (U+0B80–U+0BFF), Devanagari (U+0900–U+097F),
+  // or other Indic/non-Arabic/non-Latin scripts returns 'Urdu' (Whisper misdetections of Urdu)
+  if (/[\u0900-\u0DFF]/.test(trimmed)) {
+    return 'Urdu';
   }
 
-  if (urduWords > 0 && urduWords >= latinWords) {
+  const urduWords = (trimmed.match(/[\u0600-\u06FF]+/g) || []).length;
+  if (urduWords > 0) {
     return 'Urdu';
   }
 
   const words = trimmed.toLowerCase().split(/\s+/).map(w => w.replace(/[^a-z]/g, '')).filter(w => w.length > 0);
-  if (words.length === 0) return 'English';
+  if (words.length === 0) return 'Urdu';
 
+  let consecutiveEnglish = 0;
+  let maxConsecutiveEnglish = 0;
   let romanUrduTokens = 0;
-  let englishTokens = 0;
 
   for (const word of words) {
     if (ROMAN_URDU_KEYWORDS.has(word)) {
       romanUrduTokens++;
+      consecutiveEnglish = 0;
     } else {
-      englishTokens++;
+      consecutiveEnglish++;
+      if (consecutiveEnglish > maxConsecutiveEnglish) {
+        maxConsecutiveEnglish = consecutiveEnglish;
+      }
     }
   }
 
-  if (romanUrduTokens > englishTokens) {
+  // Respond in English ONLY when user's transcript contains 3 or more consecutive English words and no Roman Urdu
+  if (maxConsecutiveEnglish >= 3 && romanUrduTokens === 0) {
+    return 'English';
+  }
+
+  if (romanUrduTokens > 0) {
     return 'RomanUrdu';
   }
 
-  return 'English';
+  return 'Urdu';
 }
 
 /**
@@ -197,3 +207,147 @@ export function computeThinkingDelay(retrievalMs: number, targetDelayMs: number 
   const remaining = targetDelayMs - retrievalMs;
   return remaining > 0 ? remaining : 0;
 }
+
+// ── Competitor / out-of-tenant entity guard ──────────────────────────────────
+export const COMPETITOR_PATTERNS: RegExp[] = [
+  /\befu\b/i, /\bigi\b/i, /\bjubilee\b/i, /\badamjee\b/i, /\btpl\b/i, /\bstate\s*life\b/i,
+  /\bnational\s*life\b/i, /\bpakistan\s*life\b/i, /\bsalamtakaful\b/i, /\bpak\s*qatar\b/i,
+  /\bwarid\b/i, /\bhabib\s*metro\b/i, /\balianz\b/i, /\bchubb\b/i, /\bpru\s*bsn\b/i,
+];
+
+export function detectCompetitor(query: string, currentTenantName?: string): string | null {
+  const tenantLower = (currentTenantName || '').toLowerCase();
+  for (const pattern of COMPETITOR_PATTERNS) {
+    const match = query.match(pattern);
+    if (match) {
+      const matchLower = match[0].toLowerCase();
+      if (tenantLower && (tenantLower.includes(matchLower) || (matchLower === 'efu' && tenantLower.includes('efu')))) {
+        continue;
+      }
+      return match[0];
+    }
+  }
+  return null;
+}
+
+// ── Out-of-Scope & In-Scope Domain Keywords ─────────────────────────────────
+export const OUT_OF_SCOPE_KEYWORDS = /\b(match|matches|cricket|football|sports|weather|temperature|politics|election|movie|film|actor|actress|song|music|recipe|cook|medical|doctor|medicine|news|celebrity|entertainment|game|games|score|team|player|tournament|مچ|میچ|کرکٹ|فٹبال|کھیل|موسم|سیاست|الیکشن|فلم|فلمیں|گیم|گیمز|میوزک|گانا|کھانا|ڈاکٹر|دوا|خبر|خبریں)\b/i;
+
+export const IN_SCOPE_KEYWORDS = new RegExp(
+  '\\b(sidat|sprintly|software|service|services|solution|solutions|product|products|pricing|price|cost|development|web|app|mobile|ai|cloud|digital|support|contact|team|erp|crm|ai hub|artificial intelligence|web development|mobile app|website|digital marketing|seo|social media|bpo|virtual assistance|business process)\\b|' +
+  '(سڈات|سپرنٹلی|سپرینکلیکی|سپرنٹ لی|سروس|سروسز|سافٹ ویئر|حل|پروڈکٹ|قیمت|رابطہ|مصنوعی ذہانت|ویب سائٹ|موبائل ایپ|سوشل میڈیا|بزنس پروسیس)',
+  'i'
+);
+
+export const FOLLOW_UP_CONTINUATION_PATTERNS = new RegExp(
+  '\\b(aur batao|aur bataen|aur|kuch aur|haan|han|theek hai|theek|phir|acha|achha|sahi|bilkul|tell more|what else|continue|yes|ok|okay)\\b|' +
+  '(اور بتاؤ|اور بتائیں|اور|کچھ اور|ہاں|ٹھیک ہے|ٹھیک|پھر|اچھا|صحیح|بالکل)',
+  'i'
+);
+
+export function evaluateScopeAndRefusal(
+  userSpeech: string,
+  lastTurnWasRefused: boolean
+): { shouldRefuse: boolean; refused: boolean; updatedRefusedState: boolean; reason?: string } {
+  // 1. Check IN_SCOPE_KEYWORDS FIRST to prevent false-positives for legitimate queries
+  // containing terms like "game" (game development), "team" (team management), etc.
+  const isInScope = IN_SCOPE_KEYWORDS.test(userSpeech);
+  if (isInScope) {
+    if (lastTurnWasRefused) {
+      console.log(`[VoicePipelineUtils] Follow-up guard bypassed due to in-scope keyword: "${userSpeech}"`);
+    }
+    return { shouldRefuse: false, refused: false, updatedRefusedState: false };
+  }
+
+  // 2. Only if NO in-scope keyword matches, check for out-of-scope keyword
+  const isOutOfScope = OUT_OF_SCOPE_KEYWORDS.test(userSpeech);
+  if (isOutOfScope) {
+    return { shouldRefuse: true, refused: true, updatedRefusedState: true, reason: 'KEYWORD_MATCH' };
+  }
+
+  // 3. Check for out-of-scope follow-up continuation
+  if (lastTurnWasRefused) {
+    const words = userSpeech.trim().split(/\s+/).filter(Boolean);
+    const isContinuation = FOLLOW_UP_CONTINUATION_PATTERNS.test(userSpeech) || words.length <= 3;
+    if (isContinuation) {
+      console.log(`[VoicePipelineUtils] Follow-up refused. No in-scope keyword found: "${userSpeech}"`);
+      return { shouldRefuse: true, refused: true, updatedRefusedState: true, reason: 'FOLLOW_UP_CONTINUATION' };
+    }
+    // Substantive user utterance with no out-of-scope keywords: allow RAG retrieval
+    return { shouldRefuse: false, refused: false, updatedRefusedState: false };
+  }
+
+  return { shouldRefuse: false, refused: false, updatedRefusedState: false };
+}
+
+// Unit-style verification logs
+const _selfTest1 = evaluateScopeAndRefusal('game development services', false);
+console.log(`[VoicePipelineUtils] Self-test 1 ('game development services'): refused=${_selfTest1.refused} (expected false)`);
+const _selfTest2 = evaluateScopeAndRefusal('Pakistan ka match kab hai', false);
+console.log(`[VoicePipelineUtils] Self-test 2 ('Pakistan ka match kab hai'): refused=${_selfTest2.refused} (expected true)`);
+const _selfTest3 = evaluateScopeAndRefusal('Sprintly kya hai?', true);
+console.log(`[VoicePipelineUtils] Self-test 3 ('Sprintly kya hai?', after refused turn): refused=${_selfTest3.refused} (expected false)`);
+const _selfTest4 = evaluateScopeAndRefusal('Sidat ki services kya hain?', true);
+console.log(`[VoicePipelineUtils] Self-test 4 ('Sidat ki services kya hain?', after refused turn): refused=${_selfTest4.refused} (expected false)`);
+const _selfTest5 = evaluateScopeAndRefusal('aur batao', true);
+console.log(`[VoicePipelineUtils] Self-test 5 ('aur batao', after refused turn): refused=${_selfTest5.refused} (expected true)`);
+
+
+export function isFemaleVoice(voiceSettings: any = {}, selectedVoice: string = ''): boolean {
+  if (voiceSettings?.gender) {
+    return voiceSettings.gender.toLowerCase() === 'female';
+  }
+  const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
+  const voiceClean = selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
+  return femaleVoices.includes(voiceClean);
+}
+
+export const TOP_PRIORITY_SCOPE_RULE = `### TOP PRIORITY — SCOPE RULE:
+If the retrieved context is empty OR does not directly answer the user's question, OUTPUT ONLY THIS URDU TEXT and NOTHING ELSE:
+"معذرت، میں اس سوال کا جواب نہیں دے سکتا۔ براہ کرم ہماری سیلز ٹیم سے رابطہ کریں تاکہ وہ آپ کی بہتر مدد کر سکیں۔"
+DO NOT attempt to answer. DO NOT ask clarifying questions. OUTPUT ONLY THE ABOVE TEXT.`;
+
+export const DEFAULT_LANGUAGE_RULES = `### LANGUAGE:
+- Default and primary language is URDU (اردو).
+- Respond in English ONLY when the user's transcript contains 3 or more consecutive English words.
+- If the transcript is in any non-Arabic script (Tamil, Devanagari, etc.), treat it as URDU and respond in Urdu.
+- Do NOT respond in any other language even if the user asks.`;
+
+export function buildConciseSessionInstructions(isFemaleAgent: boolean): string {
+  const genderRule = isFemaleAgent
+    ? `# Gender (Urdu)\nUse FEMALE first-person verbs only (سمجھتی ہوں, بتا سکتی ہوں). NEVER use male verbs (سمجھتا ہوں, بتا سکتا ہوں).`
+    : `# Gender (Urdu)\nUse MALE first-person verbs only (سمجھتا ہوں, بتا سکتا ہوں). NEVER use female verbs (سمجھتی ہوں, بتا سکتی ہوں).`;
+
+  return `# Role
+You are Ask Sidat, AI assistant for Sidat Technologies & Digital.
+# Language
+Default: Urdu. Respond in English only if user speaks 3+ English words.
+${genderRule}
+# Scope
+Answer ONLY about Sidat Technologies & Digital services.
+If the query is about sports, weather, politics, cricket, entertainment, or any non-business topic, output ONLY the refusal text.
+# Refusal Text
+"معذرت، میں اس سوال کا جواب نہیں دے سکتا۔ براہ کرم ہماری سیلز ٹیم سے رابطہ کریں تاکہ وہ آپ کی بہتر مدد کر سکیں۔"`;
+}
+
+export function isGenericMarketingTitle(title: string): boolean {
+  if (!title) return true;
+  const t = title.trim();
+  if (t.length < 20) return true;
+  return /\b(best digital marketing|web development & design|company in pakistan|homepage|welcome|untitled)\b/i.test(t);
+}
+
+export function ts(): string {
+  return new Date().toISOString().substring(11, 23);
+}
+
+export function resolveSelectedVoice(requestedVoice?: string, agentVoice?: string): string {
+  const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar', 'onyx'];
+  const rawVoice = (requestedVoice || agentVoice || 'cedar').toLowerCase();
+  const voiceClean = rawVoice.split(' ')[0].replace(/[^a-z]/g, '');
+  return validVoices.includes(voiceClean) ? voiceClean : (validVoices.includes(rawVoice) ? rawVoice : 'cedar');
+}
+
+
+
+

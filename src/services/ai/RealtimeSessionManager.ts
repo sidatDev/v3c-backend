@@ -1,3 +1,4 @@
+
 import WebSocket from 'ws';
 import prisma from '../../lib/prisma';
 import { TenantConfigCache, TenantConfig } from '../cache/TenantConfigCache';
@@ -16,46 +17,17 @@ import {
   computeThinkingDelay,
   isConversationalGreeting,
   isConversationalAffirmation,
-  contextualizeQuery
+  contextualizeQuery,
+  detectCompetitor,
+  evaluateScopeAndRefusal,
+  isFemaleVoice,
+  buildConciseSessionInstructions,
+  isGenericMarketingTitle,
+  ts,
+  resolveSelectedVoice,
+  TOP_PRIORITY_SCOPE_RULE,
+  DEFAULT_LANGUAGE_RULES
 } from './VoicePipelineUtils';
-
-// ── Competitor / out-of-tenant entity guard ──────────────────────────────────
-const COMPETITOR_PATTERNS: RegExp[] = [
-  /\befu\b/i,
-  /\bigi\b/i,
-  /\bjubilee\b/i,
-  /\badamjee\b/i,
-  /\btpl\b/i,
-  /\bstate\s*life\b/i,
-  /\bnational\s*life\b/i,
-  /\bpakistan\s*life\b/i,
-  /\bsalamtakaful\b/i,
-  /\bpak\s*qatar\b/i,
-  /\bwarid\b/i,
-  /\bhabib\s*metro\b/i,
-  /\balianz\b/i,
-  /\bchubb\b/i,
-  /\bpru\s*bsn\b/i,
-];
-
-function detectCompetitor(query: string, currentTenantName?: string): string | null {
-  const tenantLower = (currentTenantName || '').toLowerCase();
-  for (const pattern of COMPETITOR_PATTERNS) {
-    const match = query.match(pattern);
-    if (match) {
-      const matchLower = match[0].toLowerCase();
-      if (tenantLower && (tenantLower.includes(matchLower) || (matchLower === 'efu' && tenantLower.includes('efu')))) {
-        continue;
-      }
-      return match[0];
-    }
-  }
-  return null;
-}
-
-function ts(): string {
-  return new Date().toISOString().substring(11, 23);
-}
 
 export interface VoiceSessionParams {
   socket: WebSocket;
@@ -78,39 +50,27 @@ export class RealtimeSessionManager {
   private dbSession: any = null;
   private leadId: number | null = null;
   private interestedClientId: number | null = null;
-
-  // Client IP for concurrent session throttling
   private clientIp: string = '127.0.0.1';
-
-  // Session-level language memory & confidence tracking
-  private sessionPreferredLanguage: 'English' | 'Urdu' | 'RomanUrdu' | null = null;
+  private sessionPreferredLanguage: 'English' | 'Urdu' | 'RomanUrdu' | null = 'Urdu';
   private languageConfidenceStreak: number = 0;
-
-  // Track previous turn for multi-turn query contextualization
   private lastUserTurn: string = '';
-
-  // Turn counter for limit enforcement
   private turnCount: number = 0;
-
-  // Per-turn state
   private aiTranscriptBuffer: string = '';
   private pendingTurnAudit: VoiceAuditRecord | null = null;
   private turnStartTime: number = 0;
   private selectedVoice: string = 'shimmer';
-
-  // Lifecycle guards & timers
   private greetingSent: boolean = false;
   private sessionReadySent: boolean = false;
   private isResponseInProgress: boolean = false;
   private isClosingGracefully: boolean = false;
   private isTurnCapReached: boolean = false;
   private lastTurnTimestamp: number = 0;
-
-  // Production Safeguard Timers
+  private recentUserTurns: string[] = [];
+  private lastTurnWasRefused: boolean = false;
+  private lastTurnWasNoisy: boolean = false;
   private maxDurationTimer: NodeJS.Timeout | null = null;
   private silenceTimeoutTimer: NodeJS.Timeout | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
-
   private agentId?: string;
   private publicKey?: string;
   private slug?: string;
@@ -122,7 +82,7 @@ export class RealtimeSessionManager {
     this.agentId = params.agentId;
     this.publicKey = params.publicKey;
     this.slug = params.slug;
-    this.language = params.language === 'ur' ? 'Urdu' : 'English';
+    this.language = params.language === 'en' ? 'English' : 'Urdu';
     this.clientIp = params.clientIp || '127.0.0.1';
     this.requestedVoice = params.voice;
     this.interestedClientId = params.interestedClientId ? parseInt(params.interestedClientId, 10) : null;
@@ -137,7 +97,35 @@ export class RealtimeSessionManager {
       } catch (_) {}
       this.isResponseInProgress = false;
     }
+    if (payload?.response) {
+      payload.response.tool_choice = payload.response.tool_choice || 'none';
+    }
+    if (payload?.response?.instructions) {
+      console.log('\n📚 [RAG CONTEXT SENT]:', payload.response.instructions);
+    }
     this.openAiWs.send(JSON.stringify(payload));
+  }
+
+  private sendRefusalResponse(salesRefusal: string) {
+    if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
+    console.log(`[RealtimeSessionManager] Refusal sent via conversation.item.create: "${salesRefusal}"`);
+    this.openAiWs.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{
+          type: 'input_text',
+          text: `OUTPUT ONLY THIS TEXT AND NOTHING ELSE. DO NOT ADD, MODIFY, EXPLAIN, OR TRANSLATE:\n"${salesRefusal}"`,
+        }],
+      },
+    }));
+    this.sendResponseCreate({
+      type: 'response.create',
+      response: {
+        tool_choice: 'none',
+      },
+    });
   }
 
   private resetSilenceTimeout() {
@@ -275,17 +263,11 @@ export class RealtimeSessionManager {
 
     // Configurable voice parameters with fallback to enterprise production defaults
     const vSettings = (agent.voiceSettings as any) || {};
-    const vadThreshold = typeof vSettings.vadThreshold === 'number' ? vSettings.vadThreshold : 0.70;
-    const vadSilenceDurationMs = typeof vSettings.vadSilenceDurationMs === 'number' ? vSettings.vadSilenceDurationMs : 800;
-    const vadPrefixPaddingMs = typeof vSettings.vadPrefixPaddingMs === 'number' ? vSettings.vadPrefixPaddingMs : 300;
     const voiceResponseDelayMs = typeof vSettings.voiceResponseDelayMs === 'number' ? vSettings.voiceResponseDelayMs : 600;
     const minTranscriptLength = typeof vSettings.minTranscriptLength === 'number' ? vSettings.minTranscriptLength : 3;
     const minWordCount = typeof vSettings.minWordCount === 'number' ? vSettings.minWordCount : 2;
 
-    const validVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar', 'onyx'];
-    const rawVoice = (this.requestedVoice || agent.voice || 'cedar').toLowerCase();
-    const voiceClean = rawVoice.split(' ')[0].replace(/[^a-z]/g, '');
-    this.selectedVoice = validVoices.includes(voiceClean) ? voiceClean : (validVoices.includes(rawVoice) ? rawVoice : 'cedar');
+    this.selectedVoice = resolveSelectedVoice(this.requestedVoice, agent.voice);
 
     console.log(`\n[SESSION LIFECYCLE ${ts()}] ▶ Session START`);
     console.log(`  Tenant     : ${agent.name} (${tenantId})`);
@@ -312,34 +294,33 @@ export class RealtimeSessionManager {
         tenantId, voice: this.selectedVoice, agentName: agent.name,
       });
 
+      const isFemaleAgent = isFemaleVoice(this.tenantConfig?.agent?.voiceSettings, this.selectedVoice);
+      const sessionInstructions = buildConciseSessionInstructions(isFemaleAgent);
+
       const sessionConfig = {
         type: 'session.update',
         session: {
           type: 'realtime',
-          instructions: `${baseInstructions}\nSupported Languages: STRICTLY English and Urdu ONLY. Never detect, respond in, or recognize Hindi or Devanagari script.`,
+          instructions: sessionInstructions,
           audio: {
             input: {
-              format: { type: 'audio/pcm', rate: 24000 },
               transcription: {
-                model: 'gpt-realtime-whisper',
-                language: (this.language === 'Urdu' || agent.autoLanguageDetection || (agent.language && agent.language.toLowerCase().includes('ur'))) ? 'ur' : undefined,
+                model: 'whisper-1',
+                language: 'ur',
               },
               turn_detection: {
                 type: 'server_vad',
-                threshold: vadThreshold,
-                prefix_padding_ms: vadPrefixPaddingMs,
-                silence_duration_ms: vadSilenceDurationMs,
                 create_response: false,
               },
             },
             output: {
-              format: { type: 'audio/pcm', rate: 24000 },
               voice: this.selectedVoice,
             },
           },
         },
       };
 
+      console.log('[SESSION CONFIG GA PAYLOAD]:', JSON.stringify(sessionConfig, null, 2));
       this.openAiWs?.send(JSON.stringify(sessionConfig));
     });
 
@@ -368,6 +349,11 @@ export class RealtimeSessionManager {
         return;
       }
 
+      if (event.type === 'error' && event.error?.code === 'response_cancel_not_active') {
+        console.log(`[PIPELINE ${ts()}] Debug: ignored response_cancel_not_active error:`, event.error?.message);
+        return;
+      }
+
       // Relay event to browser client
       if (this.socket.readyState === WebSocket.OPEN) {
         this.socket.send(JSON.stringify(event));
@@ -383,33 +369,20 @@ export class RealtimeSessionManager {
         // Send initial greeting on connection
         if (!this.greetingSent) {
           this.greetingSent = true;
-          const isUrdu = this.language === 'Urdu';
-          const vSettings = (this.tenantConfig?.agent?.voiceSettings as any) || {};
-          let isFemale = false;
-          if (vSettings.gender) {
-            isFemale = vSettings.gender.toLowerCase() === 'female';
-          } else {
-            const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
-            const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
-            isFemale = femaleVoices.includes(voiceClean);
-          }
-          const agentName = this.tenantConfig?.agent.name || 'Sidat';
-          const configuredGreeting = this.tenantConfig?.agent.initialGreetingMessage;
-          const greetingText = configuredGreeting || (isUrdu
-            ? (isFemale
-                ? `سلام! میں ${agentName} کی خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتی ہوں؟`
-                : `سلام! میں ${agentName} کا خودمختار ورچوئل اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتا ہوں؟`)
-            : `Hello! I am the AI Virtual Support Assistant for ${agentName}. How may I assist you today?`);
+          const isFemale = isFemaleVoice(this.tenantConfig?.agent?.voiceSettings, this.selectedVoice);
+          const greetingText = isFemale
+            ? 'As Salam o Alaikum! Main apki kiya madad kar sakti hon?'
+            : 'As Salam o Alaikum! Main apki kiya madad kar sakta hon?';
 
-          const langDirective = isUrdu
-            ? (isFemale ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
-            : `[RESPOND 100% IN ENGLISH]`;
+          const langDirective = isFemale
+            ? '[RESPOND 100% IN URDU — FEMALE VERBS ONLY]'
+            : '[RESPOND 100% IN URDU — MALE VERBS ONLY]';
 
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [INITIAL GREETING]`);
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${langDirective}\n[GREETING DIRECTIVE]: Speak EXACTLY this greeting text in ${this.language}: "${greetingText}"`,
+              instructions: `${langDirective}\n[GREETING DIRECTIVE]: Speak EXACTLY this greeting text in clear Urdu: "${greetingText}"`,
             },
           });
         }
@@ -434,10 +407,12 @@ export class RealtimeSessionManager {
       }
 
       if (event.type === 'response.output_audio_transcript.delta' && event.delta) {
+        process.stdout.write(event.delta);
         this.aiTranscriptBuffer += event.delta;
       }
 
       if (event.type === 'response.done') {
+        console.log('\n✅ [AI RESPONSE DONE] Usage:', event.response?.usage);
         if (this.tenantConfig && this.sessionIdNum && this.aiTranscriptBuffer.trim()) {
           await ConversationService.saveMessage({
             tenantId: this.tenantConfig.tenantId,
@@ -509,6 +484,16 @@ export class RealtimeSessionManager {
         event.type === 'conversation.item.input_audio_transcription.completed' &&
         event.transcript
       ) {
+        // Cancel any autonomous in-flight response only if one is active
+        if (this.isResponseInProgress && this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
+          try {
+            this.openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
+          } catch (_) {}
+          this.isResponseInProgress = false;
+        }
+        this.aiTranscriptBuffer = '';
+
+        console.log('\n🗣️ [USER SAID]:', event.transcript);
         const rawSpeech = event.transcript.trim();
         if (!rawSpeech || !this.tenantConfig) return;
 
@@ -519,8 +504,12 @@ export class RealtimeSessionManager {
 
         if (isNoisyTranscript(userSpeech, minTranscriptLength, minWordCount)) {
           console.log(`[PIPELINE ${ts()}] ⏭ IGNORED noisy transcript: "${userSpeech}"`);
+          this.lastTurnWasNoisy = true;
           return;
         }
+
+        this.recentUserTurns.push(userSpeech);
+        if (this.recentUserTurns.length > 3) this.recentUserTurns.shift();
 
         this.turnStartTime = Date.now();
         const tTranscriptDone = Date.now();
@@ -549,11 +538,18 @@ export class RealtimeSessionManager {
 
         // ── Security Layer 1: Anti-Bot Turn Cooldown Throttling ──────────────
         const nowMs = Date.now();
-        if (this.lastTurnTimestamp > 0 && (nowMs - this.lastTurnTimestamp < 2500)) {
-          console.log(`[PIPELINE ${ts()}] ⏱ ANTI-BOT THROTTLE — ignored rapid turn (<2.5s gap)`);
+        const wordCount = userSpeech.trim().split(/\s+/).filter(Boolean).length;
+        const timeSinceLastTurn = this.lastTurnTimestamp > 0 ? (nowMs - this.lastTurnTimestamp) : 999999;
+        const shouldThrottle = (this.lastTurnWasNoisy && timeSinceLastTurn < 2500) ||
+                               (wordCount < 3 && timeSinceLastTurn < 1500);
+
+        if (shouldThrottle) {
+          console.log(`[PIPELINE ${ts()}] ⏱ ANTI-BOT THROTTLE — ignored rapid turn (${timeSinceLastTurn}ms gap, words=${wordCount})`);
+          this.lastTurnWasNoisy = true;
           return;
         }
         this.lastTurnTimestamp = nowMs;
+        this.lastTurnWasNoisy = false;
 
         // ── Security Layer 2: Voice Session Turn Cap & Warning Check ────────
         const turnCapCheck = SecurityShieldService.checkSessionTurnCap(this.turnCount, 'voice');
@@ -616,14 +612,20 @@ export class RealtimeSessionManager {
           });
         }
 
-        const vSettings = (this.tenantConfig?.agent?.voiceSettings as any) || {};
-        let isFemaleVoiceTurn = false;
-        if (vSettings.gender) {
-          isFemaleVoiceTurn = vSettings.gender.toLowerCase() === 'female';
-        } else {
-          const femaleVoices = ['shimmer', 'coral', 'sage', 'verse', 'marin'];
-          const voiceClean = this.selectedVoice.split(' ')[0].toLowerCase().replace(/[^a-z]/g, '');
-          isFemaleVoiceTurn = femaleVoices.includes(voiceClean);
+        const isFemaleVoiceTurn = isFemaleVoice(this.tenantConfig?.agent?.voiceSettings, this.selectedVoice);
+
+        const salesRefusal = isUrdu
+          ? 'معذرت، میں اس سوال کا جواب نہیں دے سکتا۔ براہ کرم ہماری سیلز ٹیم سے رابطہ کریں تاکہ وہ آپ کی بہتر مدد کر سکیں۔'
+          : 'I am unable to help with this query. Please contact our sales team for further assistance.';
+
+        // ── Security Layer 4: Out-of-Scope Keyword & Follow-up Refusal Guard ─
+        const scopeCheck = evaluateScopeAndRefusal(userSpeech, this.lastTurnWasRefused);
+        this.lastTurnWasRefused = scopeCheck.updatedRefusedState;
+        if (scopeCheck.shouldRefuse) {
+          console.log(`[PIPELINE ${ts()}] 🚫 OUT-OF-SCOPE ${scopeCheck.reason} — triggering immediate hard refusal`);
+          this.lastUserTurn = userSpeech;
+          this.sendRefusalResponse(salesRefusal);
+          return;
         }
 
         // ── Intent Path A: Conversational Greetings & Affirmations ──────────
@@ -665,18 +667,52 @@ export class RealtimeSessionManager {
 
         // ── Intent Path B: Grounded Vector Search (RAG, topK = 4) ──────────
         const rawThreshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.35;
-        const threshold = isUrdu ? Math.min(rawThreshold, 0.25) : Math.min(rawThreshold, 0.38);
+        const threshold = Math.max(rawThreshold, 0.35);
         const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
 
-        const retrieval = await RetrievalService.search(
-          this.tenantConfig.tenantId,
-          searchQuery,
-          4,
-          threshold,
-        );
+        let retrieval: any;
+        try {
+          retrieval = await RetrievalService.search(
+            this.tenantConfig.tenantId,
+            searchQuery,
+            4,
+            threshold,
+          );
+        } catch (searchErr) {
+          console.error('[RealtimeSessionManager] RetrievalService.search threw error:', searchErr);
+          retrieval = {
+            chunks: [],
+            contextText: '',
+            sources: [],
+            avgSimilarity: 0,
+            topSimilarity: 0,
+            fallbackTriggered: true,
+            timings: { embeddingMs: 0, vectorSearchMs: 0, totalMs: 0 },
+          };
+        }
+
+        if (
+          !retrieval ||
+          !retrieval.chunks ||
+          retrieval.chunks.length === 0 ||
+          (retrieval.topSimilarity ?? 0) < threshold
+        ) {
+          if (retrieval) {
+            retrieval.fallbackTriggered = true;
+          }
+        }
+
+        // Title-similarity check: if top chunk's title is < 20 chars or contains generic marketing terms, treat as fallback
+        if (retrieval.chunks && retrieval.chunks.length > 0) {
+          const topTitle = (retrieval.chunks[0].sourceTitle || '').trim();
+          if (isGenericMarketingTitle(topTitle)) {
+            console.log(`[RealtimeSessionManager] Top chunk title is generic/short ("${topTitle}") — treating as fallback`);
+            retrieval.fallbackTriggered = true;
+          }
+        }
 
         this.lastUserTurn = userSpeech;
-        const retrievalMs = retrieval.timings.totalMs;
+        const retrievalMs = retrieval?.timings?.totalMs ?? 0;
         const thinkingDelayMs = computeThinkingDelay(retrievalMs, voiceResponseDelayMs);
 
         if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
@@ -690,40 +726,18 @@ export class RealtimeSessionManager {
           ? (isFemaleVoiceTurn ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
           : `[RESPOND 100% IN ENGLISH]`;
 
-        const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
-        const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(userSpeech);
-
         if (retrieval.fallbackTriggered) {
-          const isFollowUp = !!this.lastUserTurn && (
-            userSpeech.split(/\s+/).length < 7 || 
-            /\b(it|other|others|this|that|also|more|cost|price|details|besides|difference|compare|dono|doosri|doosra|elawa|alawa|aur|batao|konsa|konsi|mazeed|pehla|dosra|teesra|farq|muqabla|دوسرا|دوسری|علاوہ|اور|بتاؤ|مزید|پہلا|تیسرا|فرق|مقابلہ|درمیان|ڈیفرنس)\b/i.test(userSpeech)
-          );
-
-          if (isFollowUp || hasInsuranceKeyword) {
-            const directive = hasInsuranceKeyword && !isFollowUp
-              ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agentName} insurance services but no exact chunk matched. Answer helpfully in ${detectedLanguage} using product knowledge.`
-              : `[TURN DIRECTIVE]: Answer the follow-up query naturally in ${detectedLanguage} using conversation history regarding ${agentName} services.`;
-
-            this.sendResponseCreate({
-              type: 'response.create',
-              response: {
-                instructions: `${langGenderMandate}${warning70Directive}\n${directive}`,
-              },
-            });
-          } else {
-            this.sendResponseCreate({
-              type: 'response.create',
-              response: {
-                instructions: `${langGenderMandate}${warning70Directive}\n[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is NOT related to insurance. Politely refuse in ${detectedLanguage}. State clearly that you are the assistant for ${agentName}.`,
-              },
-            });
-          }
+          this.lastTurnWasRefused = true;
+          this.sendRefusalResponse(salesRefusal);
+          return;
         } else {
+          this.lastTurnWasRefused = false;
           const contextOnly = retrieval.contextText;
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${langGenderMandate}${warning70Directive}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer clearly in ${detectedLanguage} using this official ${agentName} knowledge base context]:\n${contextOnly}`,
+              tool_choice: 'none',
+              instructions: `${langGenderMandate}${warning70Directive}\n${baseInstructions}\n\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer clearly and concisely in ${detectedLanguage} using this official ${agentName} knowledge base context]:\n${contextOnly}\n\n[CRITICAL CONTEXT DISCIPLINE]: Answer ONLY what the user explicitly asked. Be concise. If this context contains details or products (e.g. 'Sprintly') that the user did NOT specifically ask about, DO NOT mention them. Do NOT force unrequested products or irrelevant details into your answer.\n\nCRITICAL — IF THE ABOVE CONTEXT DOES NOT CONTAIN THE DIRECT ANSWER TO THE USER'S QUESTION, OUTPUT ONLY THIS TEXT AND NOTHING ELSE. DO NOT ADD, MODIFY, EXPLAIN, OR TRANSLATE:\n"${salesRefusal}"`,
             },
           });
         }

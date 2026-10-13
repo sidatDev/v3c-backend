@@ -1068,6 +1068,7 @@ model InterestedClient {
   aiAgentId        String?
   visitorId        Int?
   visitorSessionId Int?
+  isDeleted        Boolean           @default(false)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   Tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -1082,6 +1083,7 @@ model InterestedClient {
   @@index([email])
   @@index([phone])
   @@index([visitorSessionId])
+  @@index([isDeleted])
 }
 
 model PotentialClient {
@@ -1092,6 +1094,7 @@ model PotentialClient {
   reasoning          String?
   keyIntents         String[]         @default([])
   tenantId           String
+  isDeleted          Boolean          @default(false)
   evaluatedAt        DateTime         @default(now())
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
@@ -1101,4 +1104,5 @@ model PotentialClient {
   @@index([tenantId])
   @@index([confidenceScore])
   @@index([createdAt])
+  @@index([isDeleted])
 }

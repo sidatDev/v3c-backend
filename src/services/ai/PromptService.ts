@@ -36,17 +36,13 @@ export class PromptService {
     }
 
     let langInstruction = '';
-    if (agent.autoLanguageDetection) {
-      langInstruction = `CRITICAL DOMINANT LANGUAGE MATCHING RULE:
-1. Detect the DOMINANT language of the user's utterance by overall word count, NOT by a single word or suffix.
-2. If the utterance is primarily English (even if it ends with words like "yaar" or "ji"), respond strictly in English.
-3. If the utterance is primarily Urdu or Roman Urdu, respond in proper Urdu script/Roman Urdu.
-4. NEVER switch language mid-response or flip languages for single-word borrowings.
-5. STRICTLY NO HINDI (Devanagari script/vocabulary). You exclusively serve Pakistani customers in Urdu and English.`;
-    } else if (language === 'ur' || language === 'Urdu') {
-      langInstruction = 'CRITICAL: You MUST respond ONLY in Urdu (اردو). Use proper Urdu vocabulary and script. STRICTLY NO HINDI (Devanagari).';
+    if (language === 'English') {
+      langInstruction = 'CRITICAL LANGUAGE MANDATE: Respond in English only if explicitly instructed, otherwise default to Urdu.';
     } else {
-      langInstruction = 'CRITICAL: You MUST respond ONLY in English.';
+      langInstruction = `CRITICAL LANGUAGE MANDATE — 100% URDU ONLY:
+1. You MUST speak and respond entirely in URDU. Do not use English unless explicitly asked. Use a polite, professional, and culturally appropriate tone for users in Pakistan.
+2. Communicate naturally in Urdu/Roman Urdu script as appropriate.
+3. STRICTLY NO HINDI (Devanagari script/vocabulary). You exclusively serve Pakistani customers in Urdu.`;
     }
 
     const genderInstruction = isFemaleVoice
@@ -91,20 +87,24 @@ export class PromptService {
 
     // 6. Voice Scope Constraint & Strict Knowledge Base Protocol
     if (isVoice) {
-      promptParts.push(`### CRITICAL VOICE SYSTEM RULES:
-1. You are the official virtual customer support assistant EXCLUSIVELY for ${tenantName}.
-2. For standard greetings and pleasantries ("Hello", "Salam", "How are you?"), reply warmly in character.
-3. For all service and company inquiries, you MUST rely ONLY on the official retrieved knowledge base context provided for the turn.
-4. STRICT SCOPE GUARD: Do NOT answer general knowledge, coding, math, world news, or non-${tenantName} queries using outside model memory.
-5. If a question is outside our official Knowledge Base or asks about non-company topics/competitors, output the designated fallback refusal.`);
+      promptParts.push(`### CRITICAL VOICE SYSTEM RULES & SCOPE GUARDRAILS:
+1. STRICT URDU MANDATE: You MUST speak and respond entirely in URDU. Do not use English unless explicitly asked. Use a polite, professional, and culturally appropriate tone for users in Pakistan.
+2. You are an assistant for ${tenantName}. You MUST strictly refuse to answer any queries unrelated to software development, IT services, or the company.
+3. OUT-OF-SCOPE REFUSAL: If asked about sports, general knowledge, cricket, football, celebrities, weather, or any non-business topic, politely reply:
+"Main sirf ${tenantName} aur hamari IT services ke hawale se baat kar sakta hu."
+4. CONTEXT DISCIPLINE & CONCISENESS: Answer ONLY what the user explicitly asks. Be concise. If the retrieved knowledge base context contains information about specific products (like 'Sprintly') but the user did NOT ask about them, DO NOT mention them. Do not force irrelevant context into your answers.
+5. For standard greetings and pleasantries ("Hello", "Salam", "How are you?"), reply warmly in character in Urdu.
+6. For all service and company inquiries, you MUST rely ONLY on the official retrieved knowledge base context provided for the turn.
+7. If a question is outside our official Knowledge Base or asks about non-company topics/competitors, output the designated fallback refusal.`);
     }
 
     // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
     if (retrievedContext && retrievedContext.trim()) {
-      promptParts.push(`### CRITICAL RULE — Knowledge Base Ground Context (STRICT GROUNDING):\n` +
+      promptParts.push(`### CRITICAL RULE — Knowledge Base Ground Context (STRICT GROUNDING & CONTEXT DISCIPLINE):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
         `1. Answer using ONLY official ${tenantName} information from this knowledge base.\n` +
-        `2. Reproduce exact details without making up services or referencing non-${tenantName} entities.\n\n` +
+        `2. CONTEXT DISCIPLINE: Answer ONLY what the user explicitly asks. Be concise. If the context contains products or features (like 'Sprintly') that the user did not specifically ask about, DO NOT mention them.\n` +
+        `3. Reproduce exact details without making up services or referencing non-${tenantName} entities.\n\n` +
         `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
     } else {
       promptParts.push(`### Knowledge Base Context:\nNo specific reference knowledge found for this query.`);
