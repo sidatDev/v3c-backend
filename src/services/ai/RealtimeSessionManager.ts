@@ -23,10 +23,13 @@ import {
   isFemaleVoice,
   buildConciseSessionInstructions,
   isGenericMarketingTitle,
+  normalizeSidatTerms,
+  getSalesRefusalText,
+  getGreetingText,
+  getTurnCapNotice,
+  getPromptInjectionRefusal,
   ts,
-  resolveSelectedVoice,
-  TOP_PRIORITY_SCOPE_RULE,
-  DEFAULT_LANGUAGE_RULES
+  resolveSelectedVoice
 } from './VoicePipelineUtils';
 
 export interface VoiceSessionParams {
@@ -129,12 +132,19 @@ export class RealtimeSessionManager {
   }
 
   private resetSilenceTimeout() {
-    if (this.silenceTimeoutTimer) clearTimeout(this.silenceTimeoutTimer);
+    this.clearSilenceTimeout();
     // 90-Second VAD Silence Auto-Disconnect Guard
     this.silenceTimeoutTimer = setTimeout(() => {
       console.log(`[SESSION LIFECYCLE ${ts()}] ⏱ SILENCE TIMEOUT (90s no speech) — triggering graceful disconnect`);
       this.gracefulClose('Session closed due to 90 seconds of inactivity.');
     }, 90 * 1000);
+  }
+
+  private clearSilenceTimeout() {
+    if (this.silenceTimeoutTimer) {
+      clearTimeout(this.silenceTimeoutTimer);
+      this.silenceTimeoutTimer = null;
+    }
   }
 
   private startHeartbeat() {
@@ -370,19 +380,13 @@ export class RealtimeSessionManager {
         if (!this.greetingSent) {
           this.greetingSent = true;
           const isFemale = isFemaleVoice(this.tenantConfig?.agent?.voiceSettings, this.selectedVoice);
-          const greetingText = isFemale
-            ? 'As Salam o Alaikum! Main apki kiya madad kar sakti hon?'
-            : 'As Salam o Alaikum! Main apki kiya madad kar sakta hon?';
-
-          const langDirective = isFemale
-            ? '[RESPOND 100% IN URDU — FEMALE VERBS ONLY]'
-            : '[RESPOND 100% IN URDU — MALE VERBS ONLY]';
+          const greeting = getGreetingText(isFemale);
 
           console.log(`[PIPELINE ${ts()}] → SENDING response.create() [INITIAL GREETING]`);
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${langDirective}\n[GREETING DIRECTIVE]: Speak EXACTLY this greeting text in clear Urdu: "${greetingText}"`,
+              instructions: `${greeting.directive}\n[GREETING DIRECTIVE]: Speak EXACTLY this greeting text in clear Urdu: "${greeting.text}"`,
             },
           });
         }
@@ -390,10 +394,12 @@ export class RealtimeSessionManager {
 
       if (event.type === 'response.created') {
         this.isResponseInProgress = true;
+        this.clearSilenceTimeout();
       }
 
       if (event.type === 'response.done' || event.type === 'response.cancelled') {
         this.isResponseInProgress = false;
+        this.resetSilenceTimeout();
         console.log(`[PIPELINE ${ts()}] ↓ response.done`);
 
         if (this.isClosingGracefully) {
@@ -559,9 +565,7 @@ export class RealtimeSessionManager {
           console.log(`[PIPELINE ${ts()}] 🛑 VOICE SESSION TURN CAP REACHED (Turn #${this.turnCount}/20) — initiating graceful goodbye`);
           this.isClosingGracefully = true;
           this.isTurnCapReached = true;
-          const capNotice = isUrdu
-            ? 'آپ کی گفتگو کی 20 باریوں کی حد مکمل ہو چکی ہے۔ برائے مہربانی اپنا رابطہ نمبر چھوڑ دیں تاکہ ہماری ٹیم آپ سے رابطہ کر سکے۔ شکریہ!'
-            : 'You have reached the voice session limit of 20 turns. Please leave your contact details so our support team can follow up with you. Thank you!';
+          const capNotice = getTurnCapNotice(isUrdu);
 
           this.sendResponseCreate({
             type: 'response.create',
@@ -585,9 +589,7 @@ export class RealtimeSessionManager {
         const injectionMatch = SecurityShieldService.detectPromptInjection(userSpeech);
         if (injectionMatch) {
           console.log(`[PIPELINE ${ts()}] 🛡 PROMPT INJECTION SHIELD TRIGGERED — refusing payload`);
-          const refusalMsg = isUrdu
-            ? 'معذرت، میں آپ کی اس درخواست کا جواب نہیں دے سکتا۔ میں صرف ہماری کمپنی کی سروسز میں مدد کر سکتا ہوں۔'
-            : 'I cannot fulfill requests attempting to alter system instructions. How can I assist you with our services today?';
+          const refusalMsg = getPromptInjectionRefusal(isUrdu);
 
           this.sendResponseCreate({
             type: 'response.create',
@@ -613,10 +615,7 @@ export class RealtimeSessionManager {
         }
 
         const isFemaleVoiceTurn = isFemaleVoice(this.tenantConfig?.agent?.voiceSettings, this.selectedVoice);
-
-        const salesRefusal = isUrdu
-          ? 'معذرت، میں اس سوال کا جواب نہیں دے سکتا۔ براہ کرم ہماری سیلز ٹیم سے رابطہ کریں تاکہ وہ آپ کی بہتر مدد کر سکیں۔'
-          : 'I am unable to help with this query. Please contact our sales team for further assistance.';
+        const salesRefusal = getSalesRefusalText(isUrdu);
 
         // ── Security Layer 4: Out-of-Scope Keyword & Follow-up Refusal Guard ─
         const scopeCheck = evaluateScopeAndRefusal(userSpeech, this.lastTurnWasRefused);
@@ -669,12 +668,14 @@ export class RealtimeSessionManager {
         const rawThreshold = this.tenantConfig.agent.RetrievalConfig?.similarityThreshold ?? 0.35;
         const threshold = Math.max(rawThreshold, 0.35);
         const searchQuery = contextualizeQuery(userSpeech, this.lastUserTurn);
+        const normalizedQuery = normalizeSidatTerms(searchQuery);
+        console.log(`[RetrievalService] Normalized query for embedding: "${normalizedQuery}"`);
 
         let retrieval: any;
         try {
           retrieval = await RetrievalService.search(
             this.tenantConfig.tenantId,
-            searchQuery,
+            normalizedQuery,
             4,
             threshold,
           );

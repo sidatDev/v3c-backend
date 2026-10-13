@@ -118,6 +118,32 @@ export function normalizePhoneticDomainTerms(text: string): string {
 }
 
 /**
+ * Normalizes common Urdu transliterations of Sidat terms into English domain terms
+ * specifically for vector search retrieval embeddings.
+ */
+export function normalizeSidatTerms(query: string): string {
+  if (!query) return query;
+  let normalized = query;
+
+  // Sidat transliterations: "صداد" / "سداد" / "سڈات" -> "Sidat"
+  normalized = normalized.replace(/(صداد|سداد|سڈات)/gu, 'Sidat');
+
+  // Sprintly transliterations: "اسپرینٹلی" / "سپرینٹلی" / "سپرینکلیکی" / "سپرنٹلی" / "سپرنٹ لی" -> "Sprintly"
+  normalized = normalized.replace(/(اسپرینٹلی|سپرینٹلی|سپرینکلیکی|سپرنٹلی|سپرنٹ لی)/gu, 'Sprintly');
+
+  // Technologies: "ٹیکنالوجیز" / "ٹیکنالوجی" -> "Technologies"
+  normalized = normalized.replace(/(ٹیکنالوجیز|ٹیکنالوجی)/gu, 'Technologies');
+
+  // Services: "سرویسز" / "سروسز" / "سروس" -> "services"
+  normalized = normalized.replace(/(سرویسز|سروسز|سروس)/gu, 'services');
+
+  // Product: "پروڈکٹ" / "پروڈکٹس" -> "product"
+  normalized = normalized.replace(/(پروڈکٹ|پروڈکٹس)/gu, 'product');
+
+  return normalized;
+}
+
+/**
  * Contextualize short follow-up questions ("What about motor?", "Other insurances?", "How much does it cost?")
  * using preceding dialogue context for vector search retrieval. Also applies domain phonetic normalization.
  */
@@ -235,7 +261,7 @@ export const OUT_OF_SCOPE_KEYWORDS = /\b(match|matches|cricket|football|sports|w
 
 export const IN_SCOPE_KEYWORDS = new RegExp(
   '\\b(sidat|sprintly|software|service|services|solution|solutions|product|products|pricing|price|cost|development|web|app|mobile|ai|cloud|digital|support|contact|team|erp|crm|ai hub|artificial intelligence|web development|mobile app|website|digital marketing|seo|social media|bpo|virtual assistance|business process)\\b|' +
-  '(سڈات|سپرنٹلی|سپرینکلیکی|سپرنٹ لی|سروس|سروسز|سافٹ ویئر|حل|پروڈکٹ|قیمت|رابطہ|مصنوعی ذہانت|ویب سائٹ|موبائل ایپ|سوشل میڈیا|بزنس پروسیس)',
+  '(سڈات|صداد|سداد|سپرنٹلی|اسپرینٹلی|سپرینکلیکی|سپرنٹ لی|سروس|سروسز|سرویسز|ٹیکنالوجیز|ٹیکنالوجی|سافٹ ویئر|حل|پروڈکٹ|پروڈکٹس|قیمت|رابطہ|مصنوعی ذہانت|ویب سائٹ|موبائل ایپ|سوشل میڈیا|بزنس پروسیس)',
   'i'
 );
 
@@ -346,6 +372,35 @@ export function resolveSelectedVoice(requestedVoice?: string, agentVoice?: strin
   const rawVoice = (requestedVoice || agentVoice || 'cedar').toLowerCase();
   const voiceClean = rawVoice.split(' ')[0].replace(/[^a-z]/g, '');
   return validVoices.includes(voiceClean) ? voiceClean : (validVoices.includes(rawVoice) ? rawVoice : 'cedar');
+}
+
+export function getSalesRefusalText(isUrdu: boolean): string {
+  return isUrdu
+    ? 'معذرت، میں اس سوال کا جواب نہیں دے سکتا۔ براہ کرم ہماری سیلز ٹیم سے رابطہ کریں تاکہ وہ آپ کی بہتر مدد کر سکیں۔'
+    : 'I am unable to help with this query. Please contact our sales team for further assistance.';
+}
+
+export function getGreetingText(isFemale: boolean): { text: string; directive: string } {
+  return {
+    text: isFemale
+      ? 'As Salam o Alaikum! Main apki kiya madad kar sakti hon?'
+      : 'As Salam o Alaikum! Main apki kiya madad kar sakta hon?',
+    directive: isFemale
+      ? '[RESPOND 100% IN URDU — FEMALE VERBS ONLY]'
+      : '[RESPOND 100% IN URDU — MALE VERBS ONLY]',
+  };
+}
+
+export function getTurnCapNotice(isUrdu: boolean): string {
+  return isUrdu
+    ? 'آپ کی گفتگو کی 20 باریوں کی حد مکمل ہو چکی ہے۔ برائے مہربانی اپنا رابطہ نمبر چھوڑ دیں تاکہ ہماری ٹیم آپ سے رابطہ کر سکے۔ شکریہ!'
+    : 'You have reached the voice session limit of 20 turns. Please leave your contact details so our support team can follow up with you. Thank you!';
+}
+
+export function getPromptInjectionRefusal(isUrdu: boolean): string {
+  return isUrdu
+    ? 'معذرت، میں آپ کی اس درخواست کا جواب نہیں دے سکتا۔ میں صرف ہماری کمپنی کی سروسز میں مدد کر سکتا ہوں۔'
+    : 'I cannot fulfill requests attempting to alter system instructions. How can I assist you with our services today?';
 }
 
 
