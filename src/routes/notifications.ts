@@ -2,21 +2,23 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function notificationsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/notifications
   fastify.get('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
     const userId = request.user!.userId;
 
+    const where = {
+      OR: [
+        { userId },
+        applyTenantScope({}, request.user)
+      ]
+    };
+
     const notifications = await prisma.notification.findMany({
-      where: {
-        OR: [
-          { userId },
-          ...(tenantId ? [{ tenantId }] : [])
-        ]
-      },
+      where,
       orderBy: { createdAt: 'desc' },
       take: 50
     });
@@ -24,10 +26,7 @@ export default async function notificationsRoutes(fastify: FastifyInstance, opti
     const unreadCount = await prisma.notification.count({
       where: {
         isRead: false,
-        OR: [
-          { userId },
-          ...(tenantId ? [{ tenantId }] : [])
-        ]
+        ...where
       }
     });
 
@@ -43,6 +42,21 @@ export default async function notificationsRoutes(fastify: FastifyInstance, opti
   // @route   PUT /api/notifications/:id/read
   fastify.put('/:id/read', { preHandler: protect }, async (request, reply) => {
     const id = (request.params as any).id;
+    const userId = request.user!.userId;
+
+    const notification = await prisma.notification.findFirst({
+      where: {
+        id,
+        OR: [
+          { userId },
+          applyTenantScope({}, request.user)
+        ]
+      }
+    });
+
+    if (!notification) {
+      throw new AppError('Notification not found', 404);
+    }
 
     await prisma.notification.update({
       where: { id },
@@ -54,7 +68,6 @@ export default async function notificationsRoutes(fastify: FastifyInstance, opti
 
   // @route   PUT /api/notifications/read-all
   fastify.put('/read-all', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
     const userId = request.user!.userId;
 
     await prisma.notification.updateMany({
@@ -62,7 +75,7 @@ export default async function notificationsRoutes(fastify: FastifyInstance, opti
         isRead: false,
         OR: [
           { userId },
-          ...(tenantId ? [{ tenantId }] : [])
+          applyTenantScope({}, request.user)
         ]
       },
       data: { isRead: true }

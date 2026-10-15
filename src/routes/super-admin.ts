@@ -2,14 +2,15 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function superAdminRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/super-admin/tenants-usage
   // @desc    Get tenant leaderboard with token usage, session volume, and API costs
   fastify.get('/tenants-usage', { preHandler: protect }, async (request, reply) => {
-    if (request.user?.role !== 'super_admin') {
-      throw new AppError('Access denied: Super Admin privilege required', 403);
+    if (request.user?.roleLevel !== 'L0_PLATFORM' && request.user?.role !== 'super_admin') {
+      throw new AppError('Access denied: Platform Admin privilege required', 403);
     }
 
     const { startDate, endDate, period } = request.query as any;
@@ -40,6 +41,7 @@ export default async function superAdminRoutes(fastify: FastifyInstance, options
 
     const [tenants, sessionGroups, logGroups] = await Promise.all([
       prisma.tenant.findMany({
+        where: applyTenantScope({}, request.user, 'Tenant'),
         select: {
           id: true,
           name: true,
@@ -59,13 +61,13 @@ export default async function superAdminRoutes(fastify: FastifyInstance, options
       }),
       prisma.visitorSession.groupBy({
         by: ['tenantId'],
-        where: { ...sessionWhere, tenantId: { not: null } },
+        where: applyTenantScope({ ...sessionWhere, tenantId: { not: null } }, request.user),
         _count: { id: true },
         _sum: { totalInputTokens: true, totalOutputTokens: true, estimatedCost: true }
       }),
       prisma.aiLog.groupBy({
         by: ['tenantId'],
-        where: { ...logWhere, tenantId: { not: null } },
+        where: applyTenantScope({ ...logWhere, tenantId: { not: null } }, request.user),
         _count: { id: true },
         _sum: { promptTokens: true, completionTokens: true, estimatedCost: true }
       })
@@ -115,8 +117,8 @@ export default async function superAdminRoutes(fastify: FastifyInstance, options
   // @route   GET /api/super-admin/export-usage
   // @desc    Export usage metrics as CSV string for auditing and accounting
   fastify.get('/export-usage', { preHandler: protect }, async (request, reply) => {
-    if (request.user?.role !== 'super_admin') {
-      throw new AppError('Access denied: Super Admin privilege required', 403);
+    if (request.user?.roleLevel !== 'L0_PLATFORM' && request.user?.role !== 'super_admin') {
+      throw new AppError('Access denied: Platform Admin privilege required', 403);
     }
 
     const { startDate, endDate, period } = request.query as any;
@@ -141,7 +143,7 @@ export default async function superAdminRoutes(fastify: FastifyInstance, options
     }
 
     const logs = await prisma.aiLog.findMany({
-      where: logWhere,
+      where: applyTenantScope(logWhere, request.user),
       select: {
         id: true,
         tenantId: true,

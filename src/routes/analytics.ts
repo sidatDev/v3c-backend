@@ -1,21 +1,17 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
+import { applyTenantScope } from '../utils/tenantScope';
 
 function buildWhereConditions(user: any, queryParams: any) {
   const { tenantId: targetTenantId, period, startDate: reqStart, endDate: reqEnd } = queryParams;
 
-  let whereTenant: any = {};
-  
-  // Super Admin can view all tenants or filter by specific target tenant
-  if (user.role === 'super_admin') {
-    if (targetTenantId && targetTenantId !== 'all') {
-      whereTenant = { tenantId: targetTenantId };
-    }
-  } else {
-    // Regular Tenant Admin is strictly scoped to their assigned tenant
-    whereTenant = { tenantId: user.tenantId };
+  let baseWhere: any = {};
+  if (targetTenantId && targetTenantId !== 'all') {
+    baseWhere.tenantId = targetTenantId;
   }
+
+  const whereTenant = applyTenantScope(baseWhere, user);
 
   let dateFilter: any = {};
   const now = new Date();

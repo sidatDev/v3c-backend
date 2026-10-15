@@ -5,26 +5,16 @@ import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
 import { uploadFileToS3 } from '../utils/s3';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function domainRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/domain
   // @desc    Get tenant branding and website keys list
   fastify.get('/', { preHandler: [protect, restrictTo('domain', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
-
-    const configWhere = isSuperAdmin
-      ? {}
-      : tenantId
-      ? { tenantId }
-      : {};
-
-    const domainWhere = isSuperAdmin
-      ? {}
-      : tenantId
-      ? { OR: [{ tenantId }, { tenantId: null }] }
-      : {};
+    const user = request.user!;
+    const configWhere = applyTenantScope({}, user);
+    const domainWhere = applyTenantScope({}, user);
 
     const [configs, websites] = await Promise.all([
       prisma.configuration.findMany({ where: configWhere }),
@@ -127,7 +117,9 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
 
     let effectiveTenantId = tenantId;
     if (targetDomainId) {
-      const domainRec = await prisma.domain.findUnique({ where: { id: Number(targetDomainId) } });
+      const domainRec = await prisma.domain.findFirst({
+        where: applyTenantScope({ id: Number(targetDomainId) }, request.user)
+      });
       if (domainRec && domainRec.tenantId) {
         effectiveTenantId = domainRec.tenantId;
       }
@@ -211,14 +203,14 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
   // @route   POST /api/domain/websites/:id/regenerate-keys
   // @desc    Regenerate public and private keys for a domain
   fastify.post('/websites/:id/regenerate-keys', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid Domain ID', 400);
 
-    const existing = await prisma.domain.findUnique({ where: { id } });
-    if (!existing || (!isSuperAdmin && tenantId && existing.tenantId !== tenantId)) {
+    const existing = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!existing) {
       throw new AppError('Domain not found', 404);
     }
 
@@ -239,14 +231,14 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
 
   // @route   DELETE /api/domain/websites/:id
   fastify.delete('/websites/:id', { preHandler: [protect, restrictTo('domain', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid Domain ID', 400);
 
-    const existing = await prisma.domain.findUnique({ where: { id } });
-    if (!existing || (!isSuperAdmin && tenantId && existing.tenantId !== tenantId)) {
+    const existing = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!existing) {
       throw new AppError('Domain not found', 404);
     }
 
@@ -261,7 +253,7 @@ export default async function domainRoutes(fastify: FastifyInstance, options: Fa
 
     const configs = await prisma.configuration.findMany({
       where: tenantId
-        ? { OR: [{ tenantId }, { tenantId: null }] }
+        ? { OR: [applyTenantScope({}, request.user), { tenantId: null }] }
         : { tenantId: null }
     });
 

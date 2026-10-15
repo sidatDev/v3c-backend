@@ -83,12 +83,14 @@ app.register(websocket);
 app.addHook('onResponse', auditLoggerHook);
 
 import billingRoutes from './routes/billing';
+import departmentsRoutes from './routes/departments';
 
 import leadsRoutes from './routes/leads';
 
 // 4. Register API Route Plugins
 app.register(authRoutes, { prefix: '/api/auth' });
 app.register(rolesRoutes, { prefix: '/api/roles' });
+app.register(departmentsRoutes, { prefix: '/api/departments' });
 app.register(dashboardRoutes, { prefix: '/api/dashboard' });
 app.register(conversationsRoutes, { prefix: '/api/conversations' });
 app.register(leadsRoutes, { prefix: '/api/leads' });

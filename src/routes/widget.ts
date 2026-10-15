@@ -6,6 +6,7 @@ import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
 import { openai } from '../utils/openai';
 import { TenantConfigCache } from '../services/cache/TenantConfigCache';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function widgetRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -31,12 +32,16 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   });
 
   // Helper to ensure WidgetConfig & Agent exist for tenant
-  async function getOrCreateWidgetAndAgent(tenantId: string) {
+  async function getOrCreateWidgetAndAgent(user: any) {
+    const tenantId = user?.tenantId;
     let widgetConfig = await prisma.widgetConfig.findFirst({
-      where: { tenantId }
+      where: applyTenantScope({}, user)
     });
 
     if (!widgetConfig) {
+      if (!tenantId) {
+        throw new AppError('Tenant ID missing for creating widget config', 400);
+      }
       widgetConfig = await prisma.widgetConfig.create({
         data: {
           tenantId,
@@ -56,14 +61,17 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
     }
 
     let agent = await prisma.agent.findFirst({
-      where: { tenantId, isActive: true },
+      where: applyTenantScope({ isActive: true }, user),
       orderBy: { updatedAt: 'desc' }
     }) || await prisma.agent.findFirst({
-      where: { tenantId },
+      where: applyTenantScope({}, user),
       orderBy: { updatedAt: 'desc' }
     });
 
     if (!agent) {
+      if (!tenantId) {
+        throw new AppError('Tenant ID missing for creating agent', 400);
+      }
       agent = await prisma.agent.create({
         data: {
           id: randomUUID(),
@@ -87,14 +95,9 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/widget
   // @desc    Get complete widget configuration (Critical Controls, Access Controls, Appearance, Voice)
   fastify.get('/', { preHandler: [protect, restrictTo('widget', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      throw new AppError('Tenant ID missing', 400);
-    }
-
-    const { widgetConfig, agent } = await getOrCreateWidgetAndAgent(tenantId);
+    const { widgetConfig, agent } = await getOrCreateWidgetAndAgent(request.user);
     const quickQuestions = await prisma.quickQuestion.findMany({
-      where: { tenantId },
+      where: applyTenantScope({}, request.user),
       orderBy: { createdAt: 'asc' }
     });
 
@@ -111,14 +114,9 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @route   PUT /api/widget
   // @desc    Update widget & agent configuration
   fastify.put('/', { preHandler: [protect, restrictTo('widget', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      throw new AppError('Tenant ID missing', 400);
-    }
-
     const body = request.body as any;
 
-    const { widgetConfig: existingWidget, agent: existingAgent } = await getOrCreateWidgetAndAgent(tenantId);
+    const { widgetConfig: existingWidget, agent: existingAgent } = await getOrCreateWidgetAndAgent(request.user);
 
     // Update WidgetConfig
     const updatedWidget = await prisma.widgetConfig.update({
@@ -159,7 +157,7 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
       details: { voice: updatedAgent.voice, isActive: updatedWidget.isActive }
     };
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (existingWidget.tenantId) TenantConfigCache.invalidate(existingWidget.tenantId);
 
     return {
       status: 'success',
@@ -173,11 +171,8 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/widget/quick-questions
   // @desc    List quick questions for tenant
   fastify.get('/quick-questions', { preHandler: [protect, restrictTo('widget', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
-
     const questions = await prisma.quickQuestion.findMany({
-      where: { tenantId },
+      where: applyTenantScope({}, request.user),
       orderBy: { createdAt: 'asc' }
     });
 
@@ -191,6 +186,9 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @desc    Add a quick question
   fastify.post('/quick-questions', { preHandler: [protect, restrictTo('widget', 'edit')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
+    if (!tenantId) {
+      throw new AppError('Tenant ID missing', 400);
+    }
     const { question, defaultAnswer } = request.body as any;
 
     if (!question || !defaultAnswer) {
@@ -206,7 +204,7 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
       }
     });
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    TenantConfigCache.invalidate(tenantId);
 
     reply.status(201);
     return {
@@ -218,21 +216,22 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @route   DELETE /api/widget/quick-questions/:id
   // @desc    Delete a quick question
   fastify.delete('/quick-questions/:id', { preHandler: [protect, restrictTo('widget', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) {
       throw new AppError('Invalid ID', 400);
     }
 
-    const question = await prisma.quickQuestion.findUnique({ where: { id } });
-    if (!question || (tenantId && question.tenantId !== tenantId)) {
+    const question = await prisma.quickQuestion.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!question) {
       throw new AppError('Question not found', 404);
     }
 
     await prisma.quickQuestion.delete({ where: { id } });
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (question.tenantId) TenantConfigCache.invalidate(question.tenantId);
 
     return {
       status: 'success',
@@ -243,11 +242,9 @@ export default async function widgetRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/widget/embed-code
   // @desc    Get website script embed snippet
   fastify.get('/embed-code', { preHandler: [protect, restrictTo('widget', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-
     // Get primary domain key for tenant
     const domain = await prisma.domain.findFirst({
-      where: { tenantId }
+      where: applyTenantScope({}, request.user)
     });
 
     const publicKey = domain?.publicKey || 'demo-public-key-v3c';

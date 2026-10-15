@@ -2,28 +2,19 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function billingRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/billing/summary
   // @desc    Get subscription status, conversation limits, and accurate cost breakdown
   fastify.get('/summary', { preHandler: protect }, async (request, reply) => {
-    let tenantId = request.user?.tenantId;
+    const user = request.user!;
+    const isL0 = user.roleLevel === 'L0_PLATFORM' || user.role === 'super_admin';
+    const isL1 = user.roleLevel === 'L1_GROUP';
+
     const query = (request.query as any) || {};
     const { period, startDate, endDate, tenantId: overrideTenantId } = query;
-
-    // Super admin handling: if no override or 'all', query across all tenants
-    if (request.user?.role === 'super_admin') {
-      if (!overrideTenantId || overrideTenantId === 'all') {
-        tenantId = undefined;
-      } else {
-        tenantId = overrideTenantId;
-      }
-    }
-
-    if (!tenantId && request.user?.role !== 'super_admin') {
-      throw new AppError('Tenant ID missing', 400);
-    }
 
     let dateFilter: any = {};
     if (startDate || endDate) {
@@ -39,18 +30,34 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
       dateFilter.gte = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     }
 
-    const logWhere: any = tenantId ? { tenantId } : {};
-    const sessionWhere: any = tenantId ? { tenantId } : {};
-
+    const baseFilter: any = {};
     if (Object.keys(dateFilter).length > 0) {
-      logWhere.createdAt = dateFilter;
-      sessionWhere.createdAt = dateFilter;
+      baseFilter.createdAt = dateFilter;
     }
 
-    const [tenant, tenantLimit, subscription, sessionStats, voiceLogStats, chatLogStats, voiceSessionStats, tenantsList] = await Promise.all([
-      tenantId ? prisma.tenant.findUnique({ where: { id: tenantId } }) : null,
-      tenantId ? prisma.tenantLimit.findUnique({ where: { tenantId } }) : null,
-      tenantId ? prisma.subscription.findFirst({ where: { tenantId }, orderBy: { createdAt: 'desc' } }) : null,
+    if (overrideTenantId && overrideTenantId !== 'all') {
+      baseFilter.tenantId = overrideTenantId;
+    }
+
+    const logWhere = applyTenantScope(baseFilter, user);
+    const sessionWhere = applyTenantScope(baseFilter, user);
+
+    const effectiveTenantId = (overrideTenantId && overrideTenantId !== 'all' && (isL0 || isL1))
+      ? overrideTenantId
+      : user.tenantId;
+
+    const [tenant, tenantsList, sessionStats, voiceLogStats, chatLogStats, voiceSessionStats] = await Promise.all([
+      effectiveTenantId
+        ? prisma.tenant.findFirst({
+            where: applyTenantScope({ id: effectiveTenantId }, user, 'Tenant')
+          })
+        : null,
+      (isL0 || isL1)
+        ? prisma.tenant.findMany({
+            where: applyTenantScope({}, user, 'Tenant'),
+            select: { id: true, name: true, slug: true }
+          })
+        : Promise.resolve([]),
       prisma.visitorSession.aggregate({
         where: sessionWhere,
         _count: { id: true }
@@ -69,9 +76,11 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
         where: { ...sessionWhere, channel: 'voice' },
         _count: { id: true },
         _sum: { totalInputTokens: true, totalOutputTokens: true, estimatedCost: true }
-      }),
-      request.user?.role === 'super_admin' ? prisma.tenant.findMany({ select: { id: true, name: true, slug: true } }) : Promise.resolve([])
+      })
     ]);
+
+    const tenantLimit = tenant ? await prisma.tenantLimit.findUnique({ where: { tenantId: tenant.id } }) : null;
+    const subscription = tenant ? await prisma.subscription.findFirst({ where: { tenantId: tenant.id }, orderBy: { createdAt: 'desc' } }) : null;
 
     const sessionCount = sessionStats._count.id || 0;
     const maxConversations = tenantLimit?.maxConversations || 1000;

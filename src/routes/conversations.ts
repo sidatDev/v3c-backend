@@ -4,29 +4,26 @@ import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { parsePagination, formatPaginatedResponse } from '../utils/pagination';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function conversationsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/conversations
   // @desc    Get paginated list of aggregated visitor sessions for tenant
   fastify.get('/', { preHandler: [protect, restrictTo('conversations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      return formatPaginatedResponse([], 0, { page: 1, limit: 10 });
-    }
+    const user = request.user!;
 
     const { page, limit, skip, sortBy, sortOrder, search } = parsePagination(request, 'createdAt', 'desc');
     const query = (request.query as any) || {};
     const { period, startDate, endDate, channel } = query;
 
-    const whereCondition: any = {
-      tenantId,
+    const baseWhere: any = {
       // Only include sessions that have exchanged messages
       Conversation: { some: {} }
     };
 
     if (search) {
-      whereCondition.OR = [
+      baseWhere.OR = [
         { Lead: { some: { name: { contains: search, mode: 'insensitive' } } } },
         { Lead: { some: { email: { contains: search, mode: 'insensitive' } } } },
         { Conversation: { some: { message: { contains: search, mode: 'insensitive' } } } },
@@ -34,7 +31,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
     }
 
     if (channel && (channel === 'chat' || channel === 'voice')) {
-      whereCondition.channel = channel;
+      baseWhere.channel = channel;
     }
 
     const dateFilter: any = {};
@@ -51,12 +48,14 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
     }
 
     if (Object.keys(dateFilter).length > 0) {
-      whereCondition.createdAt = dateFilter;
+      baseWhere.createdAt = dateFilter;
     }
+
+    const scopedWhere = applyTenantScope(baseWhere, user);
 
     const [sessions, total] = await Promise.all([
       prisma.visitorSession.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
@@ -74,7 +73,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
           }
         }
       }),
-      prisma.visitorSession.count({ where: whereCondition })
+      prisma.visitorSession.count({ where: scopedWhere })
     ]);
 
     // Map sessions to formatted conversation items
@@ -107,21 +106,17 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
   // @route   GET /api/conversations/export-csv
   // @desc    Export CSV usage report for tenant conversations with token & billing calculations
   fastify.get('/export-csv', { preHandler: [protect, restrictTo('conversations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      throw new AppError('Tenant not found', 400);
-    }
+    const user = request.user!;
 
     const query = (request.query as any) || {};
     const { period, startDate, endDate, channel } = query;
 
-    const whereCondition: any = {
-      tenantId,
+    const baseWhere: any = {
       Conversation: { some: {} }
     };
 
     if (channel && (channel === 'chat' || channel === 'voice')) {
-      whereCondition.channel = channel;
+      baseWhere.channel = channel;
     }
 
     const dateFilter: any = {};
@@ -138,12 +133,15 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
     }
 
     if (Object.keys(dateFilter).length > 0) {
-      whereCondition.createdAt = dateFilter;
+      baseWhere.createdAt = dateFilter;
     }
+
+    const scopedWhere = applyTenantScope(baseWhere, user);
+    const aiLogScopedWhere = applyTenantScope(Object.keys(dateFilter).length > 0 ? { createdAt: dateFilter } : {}, user);
 
     const [sessions, aiLogs] = await Promise.all([
       prisma.visitorSession.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         orderBy: { createdAt: 'desc' },
         take: 5000,
         include: {
@@ -157,7 +155,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
         }
       }),
       prisma.aiLog.findMany({
-        where: { tenantId, ...(Object.keys(dateFilter).length > 0 ? { createdAt: dateFilter } : {}) },
+        where: aiLogScopedWhere,
         select: { promptTokens: true, completionTokens: true, estimatedCost: true }
       })
     ]);
@@ -209,16 +207,16 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
   // @route   GET /api/conversations/:id
   // @desc    Get single conversation/session detail with full transcript messages
   fastify.get('/:id', { preHandler: [protect, restrictTo('conversations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const paramId = parseInt((request.params as any).id);
 
     if (isNaN(paramId)) {
       throw new AppError('Invalid Conversation ID', 400);
     }
 
-    // Try finding VisitorSession first by ID
-    let session = await prisma.visitorSession.findUnique({
-      where: { id: paramId },
+    // Try finding VisitorSession first by ID scoped to tenant
+    let session = await prisma.visitorSession.findFirst({
+      where: applyTenantScope({ id: paramId }, user),
       include: {
         Lead: true,
         Agent: true,
@@ -228,9 +226,9 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
 
     let conversation: any = null;
 
-    if (session && (!tenantId || session.tenantId === tenantId)) {
+    if (session) {
       const latestConv = await prisma.conversation.findFirst({
-        where: { visitorSessionId: session.id },
+        where: applyTenantScope({ visitorSessionId: session.id }, user),
         orderBy: { createdAt: 'desc' },
         include: { Lead: true, Agent: true, Domain: true }
       });
@@ -269,9 +267,9 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
             }
           };
     } else {
-      // Fallback: try finding Conversation record by ID
-      conversation = await prisma.conversation.findUnique({
-        where: { id: paramId },
+      // Fallback: try finding Conversation record by ID scoped to tenant
+      conversation = await prisma.conversation.findFirst({
+        where: applyTenantScope({ id: paramId }, user),
         include: {
           Lead: true,
           Agent: true,
@@ -281,7 +279,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
         }
       });
 
-      if (!conversation || (tenantId && conversation.tenantId !== tenantId)) {
+      if (!conversation) {
         throw new AppError('Conversation not found', 404);
       }
       session = conversation.VisitorSession as any;
@@ -292,10 +290,7 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
     let transcriptMessages: any[] = [];
     if (visitorSessionId) {
       transcriptMessages = await prisma.conversation.findMany({
-        where: {
-          visitorSessionId,
-          ...(tenantId ? { tenantId } : {})
-        },
+        where: applyTenantScope({ visitorSessionId }, user),
         orderBy: { createdAt: 'asc' },
         include: {
           Lead: {
@@ -322,19 +317,19 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
   // @route   DELETE /api/conversations/:id
   // @desc    Delete single session or conversation transcript
   fastify.delete('/:id', { preHandler: [protect, restrictTo('conversations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const paramId = parseInt((request.params as any).id);
 
     if (isNaN(paramId)) {
       throw new AppError('Invalid Conversation ID', 400);
     }
 
-    // Try deleting VisitorSession and all its messages
-    const session = await prisma.visitorSession.findUnique({
-      where: { id: paramId }
+    // Try finding VisitorSession first by ID scoped to tenant
+    const session = await prisma.visitorSession.findFirst({
+      where: applyTenantScope({ id: paramId }, user)
     });
 
-    if (session && (!tenantId || session.tenantId === tenantId)) {
+    if (session) {
       await prisma.conversation.deleteMany({
         where: { visitorSessionId: session.id }
       });
@@ -342,20 +337,17 @@ export default async function conversationsRoutes(fastify: FastifyInstance, opti
         where: { id: session.id }
       });
     } else {
-      const conversation = await prisma.conversation.findUnique({
-        where: { id: paramId }
+      const conversation = await prisma.conversation.findFirst({
+        where: applyTenantScope({ id: paramId }, user)
       });
 
-      if (!conversation || (tenantId && conversation.tenantId !== tenantId)) {
+      if (!conversation) {
         throw new AppError('Conversation not found', 404);
       }
 
       if (conversation.visitorSessionId) {
         await prisma.conversation.deleteMany({
-          where: {
-            visitorSessionId: conversation.visitorSessionId,
-            ...(tenantId ? { tenantId } : {})
-          }
+          where: { visitorSessionId: conversation.visitorSessionId }
         });
         await prisma.visitorSession.delete({
           where: { id: conversation.visitorSessionId }

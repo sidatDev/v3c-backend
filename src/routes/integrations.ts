@@ -4,17 +4,15 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function integrationsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/integrations
   // @desc    Get list of registered integrations
   fastify.get('/', { preHandler: [protect, restrictTo('integrations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
-
     const integrations = await prisma.integration.findMany({
-      where: { tenantId },
+      where: applyTenantScope({}, request.user),
       include: {
         IntegrationTool: true
       },
@@ -25,9 +23,12 @@ export default async function integrationsRoutes(fastify: FastifyInstance, optio
   });
 
   // @route   POST /api/integrations
-  // @desc    Register a new third-party integration (Super Admin only)
+  // @desc    Register a new third-party integration
   fastify.post('/', { preHandler: [protect, restrictTo('integrations', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
+    if (!tenantId) {
+      throw new AppError('Tenant ID missing', 400);
+    }
     const { name, description, baseUrl, authType, authConfig } = request.body as any;
 
     if (!name || !baseUrl) {
@@ -37,7 +38,7 @@ export default async function integrationsRoutes(fastify: FastifyInstance, optio
     const integration = await prisma.integration.create({
       data: {
         id: randomUUID(),
-        tenantId: tenantId!,
+        tenantId,
         name,
         description,
         baseUrl,
@@ -54,12 +55,13 @@ export default async function integrationsRoutes(fastify: FastifyInstance, optio
 
   // @route   PUT /api/integrations/:id
   fastify.put('/:id', { preHandler: [protect, restrictTo('integrations', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
     const id = (request.params as any).id;
     const { name, description, baseUrl, authType, authConfig, isActive } = request.body as any;
 
-    const existing = await prisma.integration.findUnique({ where: { id } });
-    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+    const existing = await prisma.integration.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!existing) {
       throw new AppError('Integration not found', 404);
     }
 
@@ -81,11 +83,12 @@ export default async function integrationsRoutes(fastify: FastifyInstance, optio
 
   // @route   DELETE /api/integrations/:id
   fastify.delete('/:id', { preHandler: [protect, restrictTo('integrations', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
     const id = (request.params as any).id;
 
-    const existing = await prisma.integration.findUnique({ where: { id } });
-    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+    const existing = await prisma.integration.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!existing) {
       throw new AppError('Integration not found', 404);
     }
 
@@ -96,11 +99,8 @@ export default async function integrationsRoutes(fastify: FastifyInstance, optio
   // @route   GET /api/integrations/logs
   // @desc    Get integration execution logs
   fastify.get('/logs', { preHandler: [protect, restrictTo('integrations', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
-
     const logs = await prisma.integrationLog.findMany({
-      where: { tenantId },
+      where: applyTenantScope({}, request.user),
       include: {
         Integration: {
           select: { name: true }

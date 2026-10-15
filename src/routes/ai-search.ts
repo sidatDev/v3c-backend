@@ -5,6 +5,7 @@ import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
 import { generateEmbedding, chunkText } from '../utils/openai';
+import { applyTenantScope } from '../utils/tenantScope';
 
 const SEARCH_SERVICE_URL = process.env.SEARCH_SERVICE_URL || 'http://localhost:3725';
 
@@ -75,20 +76,12 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
   // @route   GET /api/ai-search
   // @desc    List all domains configured for AI Search (scoped by tenant and domain RBAC)
   fastify.get('/', { preHandler: [protect, restrictTo('ai_search', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const userDomainLock = await getUserDomainLock(request.user!.userId);
 
-    const whereCondition: any = {};
-    if (tenantId && !isSuperAdmin) {
-      whereCondition.tenantId = tenantId;
-    }
-    if (userDomainLock) {
-      whereCondition.id = userDomainLock;
-    }
+    const baseWhere = userDomainLock ? { id: userDomainLock } : {};
 
     const domains = await prisma.domain.findMany({
-      where: whereCondition,
+      where: applyTenantScope(baseWhere, request.user),
       orderBy: { createdAt: 'desc' },
       include: {
         Agent: true
@@ -137,12 +130,12 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       throw new AppError('Forbidden: You do not have access to this domain.', 403);
     }
 
-    const domain = await prisma.domain.findUnique({
-      where: { id },
+    const domain = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user),
       include: { Agent: true }
     });
 
-    if (!domain || (!isSuperAdmin && tenantId && domain.tenantId !== tenantId)) {
+    if (!domain) {
       throw new AppError('Domain not found.', 404);
     }
 
@@ -276,12 +269,12 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       throw new AppError('Forbidden: You do not have access to manage this domain.', 403);
     }
 
-    const existingDomain = await prisma.domain.findUnique({
-      where: { id },
+    const existingDomain = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user),
       include: { Agent: true }
     });
 
-    if (!existingDomain || (!isSuperAdmin && tenantId && existingDomain.tenantId !== tenantId)) {
+    if (!existingDomain) {
       throw new AppError('Domain not found.', 404);
     }
 
@@ -324,8 +317,6 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
   // @route   DELETE /api/ai-search/:id
   // @desc    Delete AI Search domain configuration and all of its data
   fastify.delete('/:id', { preHandler: [protect, restrictTo('ai_search', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id, 10);
     const userDomainLock = await getUserDomainLock(request.user!.userId);
 
@@ -334,8 +325,10 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       throw new AppError('Forbidden: Scoped users cannot delete domains.', 403);
     }
 
-    const domain = await prisma.domain.findUnique({ where: { id } });
-    if (!domain || (!isSuperAdmin && tenantId && domain.tenantId !== tenantId)) {
+    const domain = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!domain) {
       throw new AppError('Domain not found.', 404);
     }
 
@@ -348,8 +341,6 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
   // @route   POST /api/ai-search/:id/crawl
   // @desc    Trigger background crawler in search microservice
   fastify.post('/:id/crawl', { preHandler: [protect, restrictTo('ai_search', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id, 10);
     const userDomainLock = await getUserDomainLock(request.user!.userId);
 
@@ -358,12 +349,12 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       throw new AppError('Forbidden: You do not have access to trigger crawls.', 403);
     }
 
-    const domain = await prisma.domain.findUnique({
-      where: { id },
+    const domain = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user),
       include: { Agent: true }
     });
 
-    if (!domain || (!isSuperAdmin && tenantId && domain.tenantId !== tenantId)) {
+    if (!domain) {
       throw new AppError('Domain not found.', 404);
     }
 
@@ -396,8 +387,6 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
   // @route   GET /api/ai-search/:id/crawl-status
   // @desc    Fetch live crawling status from microservice
   fastify.get('/:id/crawl-status', { preHandler: [protect, restrictTo('ai_search', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const id = parseInt((request.params as any).id, 10);
     const userDomainLock = await getUserDomainLock(request.user!.userId);
 
@@ -406,8 +395,10 @@ export default async function aiSearchRoutes(fastify: FastifyInstance, options: 
       throw new AppError('Forbidden: Access denied.', 403);
     }
 
-    const domain = await prisma.domain.findUnique({ where: { id } });
-    if (!domain || (!isSuperAdmin && tenantId && domain.tenantId !== tenantId)) {
+    const domain = await prisma.domain.findFirst({
+      where: applyTenantScope({ id }, request.user)
+    });
+    if (!domain) {
       throw new AppError('Domain not found.', 404);
     }
 

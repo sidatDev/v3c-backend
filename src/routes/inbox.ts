@@ -3,21 +3,18 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { parsePagination, formatPaginatedResponse } from '../utils/pagination';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function inboxRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/inbox
   // @desc    Get CRM Conversation Inbox sessions with filtering & pagination
   fastify.get('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      return formatPaginatedResponse([], 0, { page: 1, limit: 10 });
-    }
-
+    const user = request.user!;
     const query = request.query as any;
     const { page, limit, skip, sortBy, sortOrder } = parsePagination(request, 'createdAt', 'desc');
 
-    const whereCondition: any = { tenantId };
+    const whereCondition: any = {};
 
     if (query.status) {
       whereCondition.conversationStatus = query.status;
@@ -42,9 +39,11 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
       ];
     }
 
+    const scopedWhere = applyTenantScope(whereCondition, user);
+
     const [sessions, total] = await Promise.all([
       prisma.visitorSession.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
@@ -58,7 +57,7 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
           }
         }
       }),
-      prisma.visitorSession.count({ where: whereCondition })
+      prisma.visitorSession.count({ where: scopedWhere })
     ]);
 
     return formatPaginatedResponse(sessions, total, { page, limit });
@@ -67,7 +66,7 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
   // @route   GET /api/inbox/:sessionId
   // @desc    Get detailed conversation session with full transcript & metadata
   fastify.get('/:sessionId', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const sessionId = parseInt((request.params as any).sessionId);
 
     if (isNaN(sessionId)) {
@@ -75,7 +74,7 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
     }
 
     const session = await prisma.visitorSession.findFirst({
-      where: { id: sessionId, tenantId: tenantId || undefined },
+      where: applyTenantScope({ id: sessionId }, user),
       include: {
         Agent: true,
         Lead: true,
@@ -107,7 +106,7 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
   // @route   PUT /api/inbox/:sessionId
   // @desc    Update session CRM attributes (status, tags, notes, assignment)
   fastify.put('/:sessionId', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const sessionId = parseInt((request.params as any).sessionId);
     const body = request.body as any;
 
@@ -116,7 +115,7 @@ export default async function inboxRoutes(fastify: FastifyInstance, options: Fas
     }
 
     const session = await prisma.visitorSession.findFirst({
-      where: { id: sessionId, tenantId: tenantId || undefined }
+      where: applyTenantScope({ id: sessionId }, user)
     });
 
     if (!session) {

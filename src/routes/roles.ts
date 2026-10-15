@@ -3,6 +3,7 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function rolesRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -24,17 +25,18 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
   // @route   GET /api/roles
   // @desc    Get list of available roles (System roles + tenant roles)
   fastify.get('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isL0 = request.user?.roleLevel === 'L0_PLATFORM' || request.user?.role === 'super_admin';
+    const scopedWhere = isL0
+      ? {}
+      : {
+          OR: [
+            { isSystem: true }, // Built-in system roles
+            applyTenantScope({}, request.user) // Tenant / Group scoped custom roles
+          ]
+        };
 
     const roles = await prisma.role.findMany({
-      where: {
-        OR: [
-          { isSystem: true }, // Built-in system roles
-          ...(tenantId && !isSuperAdmin ? [{ tenantId }] : []), // Tenant-specific roles
-          ...(isSuperAdmin ? [{ tenantId: { not: null } }] : []) // Super Admins can see all
-        ]
-      },
+      where: scopedWhere,
       include: {
         RolePermission: {
           include: { Permission: true }
@@ -59,7 +61,7 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Create a custom tenant role
   fastify.post('/', { preHandler: [protect, restrictTo('roles', 'manage')] }, async (request, reply) => {
     const { name, description, permissions } = request.body as any;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isSuperAdmin = request.user!.role === 'super_admin' || request.user?.roleLevel === 'L0_PLATFORM';
     const tenantId = isSuperAdmin ? (request.body as any).tenantId : request.user!.tenantId;
 
     if (!name) {
@@ -70,9 +72,9 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Managers can only create tenant-scoped custom roles.', 403);
     }
 
-    // Verify role name collision
+    // Verify role name collision within scope
     const existing = await prisma.role.findFirst({
-      where: { name, tenantId }
+      where: applyTenantScope({ name }, request.user)
     });
     if (existing) {
       throw new AppError('A role with this name already exists in the scope.', 400);
@@ -138,13 +140,23 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
   fastify.put('/:id/permissions', { preHandler: [protect, restrictTo('roles', 'manage')] }, async (request, reply) => {
     const roleId = (request.params as any).id;
     const { permissions } = request.body as any;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isSuperAdmin = request.user!.role === 'super_admin' || request.user?.roleLevel === 'L0_PLATFORM';
 
     if (!permissions || !Array.isArray(permissions)) {
       throw new AppError('Permissions array is required.', 400);
     }
 
-    const role = await prisma.role.findUnique({ where: { id: roleId } });
+    const role = await prisma.role.findFirst({
+      where: isSuperAdmin
+        ? { id: roleId }
+        : {
+            id: roleId,
+            OR: [
+              { isSystem: true },
+              applyTenantScope({}, request.user)
+            ]
+          }
+    });
     if (!role) {
       throw new AppError('Role not found.', 404);
     }
@@ -152,11 +164,6 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
     // Prevent modifying system built-in roles unless super admin
     if (role.isSystem && !isSuperAdmin) {
       throw new AppError('Built-in system roles cannot be modified.', 403);
-    }
-
-    // Verify tenant boundaries
-    if (!isSuperAdmin && role.tenantId !== request.user!.tenantId) {
-      throw new AppError('You do not have permission to modify roles outside your tenant.', 403);
     }
 
     // 1. Resolve all target permissions in a single query
@@ -203,13 +210,8 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
   // @route   GET /api/roles/users
   // @desc    Get list of all users in the tenant
   fastify.get('/users', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
-
     const users = await prisma.user.findMany({
-      where: {
-        ...(tenantId && !isSuperAdmin ? { tenantId } : {})
-      },
+      where: applyTenantScope({}, request.user),
       select: {
         id: true,
         name: true,
@@ -229,7 +231,7 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
   fastify.post('/users/:id/assign', { preHandler: [protect, restrictTo('team', 'manage')] }, async (request, reply) => {
     const userId = parseInt((request.params as any).id);
     const { roleId } = request.body as any;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isSuperAdmin = request.user!.role === 'super_admin' || request.user?.roleLevel === 'L0_PLATFORM';
 
     if (isNaN(userId)) {
       throw new AppError('Invalid User ID.', 400);
@@ -239,26 +241,28 @@ export default async function rolesRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Role ID is required.', 400);
     }
 
-    // Verify target user exists
-    const targetUser = await prisma.user.findUnique({ where: { id: userId } });
+    // Verify target user exists within tenant scope
+    const targetUser = await prisma.user.findFirst({
+      where: applyTenantScope({ id: userId }, request.user)
+    });
     if (!targetUser) {
       throw new AppError('User not found.', 404);
     }
 
-    // Verify tenant boundary for user
-    if (!isSuperAdmin && targetUser.tenantId !== request.user!.tenantId) {
-      throw new AppError('You cannot modify users outside your tenant.', 403);
-    }
-
-    // Verify target role exists
-    const targetRole = await prisma.role.findUnique({ where: { id: roleId } });
+    // Verify target role exists within tenant scope (or is system role)
+    const targetRole = await prisma.role.findFirst({
+      where: isSuperAdmin
+        ? { id: roleId }
+        : {
+            id: roleId,
+            OR: [
+              { isSystem: true },
+              applyTenantScope({}, request.user)
+            ]
+          }
+    });
     if (!targetRole) {
-      throw new AppError('Role not found.', 404);
-    }
-
-    // Verify tenant boundary for role
-    if (!isSuperAdmin && targetRole.tenantId && targetRole.tenantId !== request.user!.tenantId) {
-      throw new AppError('You cannot assign roles belonging to other tenants.', 403);
+      throw new AppError('Role not found or outside tenant scope.', 404);
     }
 
     await prisma.$transaction(async (tx) => {

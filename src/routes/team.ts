@@ -4,21 +4,17 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { restrictTo } from '../middleware/rbac';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function teamRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/team
   // @desc    Get list of team members in tenant
   fastify.get('/', { preHandler: [protect, restrictTo('team', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
-
     const pageParam = (request.query as any).page;
     const limitParam = (request.query as any).limit;
     
-    const where = {
-      ...(tenantId && !isSuperAdmin ? { tenantId } : {})
-    };
+    const where = applyTenantScope({}, request.user);
 
     if (pageParam !== undefined || limitParam !== undefined) {
       const page = Math.max(1, parseInt(pageParam) || 1);
@@ -121,7 +117,7 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
   // @desc    Invite / Add a new team member
   fastify.post('/', { preHandler: [protect, restrictTo('team', 'manage')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isSuperAdmin = request.user!.role === 'super_admin' || request.user?.roleLevel === 'L0_PLATFORM';
     const { name, email, password, roleId, phone, domainId } = request.body as any;
 
     if (!name || !email) {
@@ -139,7 +135,20 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
     // Verify assigned role if provided
     let targetRole = null;
     if (roleId) {
-      targetRole = await prisma.role.findUnique({ where: { id: roleId } });
+      targetRole = await prisma.role.findFirst({
+        where: isSuperAdmin
+          ? { id: roleId }
+          : {
+              id: roleId,
+              OR: [
+                { isSystem: true },
+                applyTenantScope({}, request.user)
+              ]
+            }
+      });
+      if (!targetRole) {
+        throw new AppError('Role not found or outside tenant scope.', 404);
+      }
     }
 
     const roleName = targetRole?.name || 'member';
@@ -208,21 +217,32 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
   // @route   PUT /api/team/:id
   // @desc    Update team member (role or status)
   fastify.put('/:id', { preHandler: [protect, restrictTo('team', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
+    const isSuperAdmin = request.user!.role === 'super_admin' || request.user?.roleLevel === 'L0_PLATFORM';
     const userId = parseInt((request.params as any).id);
     const { name, phone, roleId, status, domainId } = request.body as any;
 
     if (isNaN(userId)) throw new AppError('Invalid User ID', 400);
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user || (!isSuperAdmin && user.tenantId !== tenantId)) {
+    const user = await prisma.user.findFirst({
+      where: applyTenantScope({ id: userId }, request.user)
+    });
+    if (!user) {
       throw new AppError('Team member not found', 404);
     }
 
     let roleName = user.role;
     if (roleId) {
-      const targetRole = await prisma.role.findUnique({ where: { id: roleId } });
+      const targetRole = await prisma.role.findFirst({
+        where: isSuperAdmin
+          ? { id: roleId }
+          : {
+              id: roleId,
+              OR: [
+                { isSystem: true },
+                applyTenantScope({}, request.user)
+              ]
+            }
+      });
       if (targetRole) {
         roleName = targetRole.name;
 
@@ -234,6 +254,8 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
             tenantId: user.tenantId
           }
         });
+      } else {
+        throw new AppError('Role not found or outside tenant scope.', 404);
       }
     }
 
@@ -255,14 +277,14 @@ export default async function teamRoutes(fastify: FastifyInstance, options: Fast
   // @route   DELETE /api/team/:id
   // @desc    Remove / Disable a team member
   fastify.delete('/:id', { preHandler: [protect, restrictTo('team', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const isSuperAdmin = request.user!.role === 'super_admin';
     const userId = parseInt((request.params as any).id);
 
     if (isNaN(userId)) throw new AppError('Invalid User ID', 400);
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user || (!isSuperAdmin && user.tenantId !== tenantId)) {
+    const user = await prisma.user.findFirst({
+      where: applyTenantScope({ id: userId }, request.user)
+    });
+    if (!user) {
       throw new AppError('Team member not found', 404);
     }
 

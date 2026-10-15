@@ -3,6 +3,7 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { parsePagination, formatPaginatedResponse } from '../utils/pagination';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function aiLogsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -15,12 +16,8 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
 
     const whereCondition: any = {};
 
-    if (user.role === 'super_admin') {
-      if (query.tenantId && query.tenantId !== 'all') {
-        whereCondition.tenantId = query.tenantId;
-      }
-    } else {
-      whereCondition.tenantId = user.tenantId;
+    if (query.tenantId && query.tenantId !== 'all') {
+      whereCondition.tenantId = query.tenantId;
     }
 
     if (query.startDate || query.endDate) {
@@ -56,9 +53,11 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
       ];
     }
 
+    const scopedWhere = applyTenantScope(whereCondition, user);
+
     const [logs, total] = await Promise.all([
       prisma.aiLog.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
@@ -68,7 +67,7 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
           }
         }
       }),
-      prisma.aiLog.count({ where: whereCondition })
+      prisma.aiLog.count({ where: scopedWhere })
     ]);
 
     return formatPaginatedResponse(logs, total, { page, limit });
@@ -80,13 +79,8 @@ export default async function aiLogsRoutes(fastify: FastifyInstance, options: Fa
     const user = request.user!;
     const { id } = request.params as { id: string };
 
-    const where: any = { id };
-    if (user.role !== 'super_admin') {
-      where.tenantId = user.tenantId;
-    }
-
     const log = await prisma.aiLog.findFirst({
-      where,
+      where: applyTenantScope({ id }, user),
       include: {
         VisitorSession: true
       }

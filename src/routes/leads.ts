@@ -3,6 +3,7 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { parsePagination, formatPaginatedResponse } from '../utils/pagination';
 import { AppError } from '../middleware/error';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function leadsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -10,28 +11,14 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Get paginated list of Interested Clients for the authenticated tenant (or all for super_admin)
   fastify.get('/interested', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
-    const isSuperAdmin = user.role === 'super_admin';
     const query = (request.query as any) || {};
 
     const { page, limit, skip, sortBy, sortOrder, search } = parsePagination(request, 'createdAt', 'desc');
 
     const whereCondition: any = { isDeleted: false };
 
-    // Filter by tenant unless super_admin with no specific tenant filter
-    if (!isSuperAdmin) {
-      if (query.slug && query.slug !== 'all') {
-        const t = await prisma.tenant.findFirst({ where: { slug: query.slug } });
-        if (t) {
-          whereCondition.tenantId = t.id;
-        } else if (user.tenantId) {
-          whereCondition.tenantId = user.tenantId;
-        }
-      } else if (user.tenantId) {
-        whereCondition.tenantId = user.tenantId;
-      } else {
-        return formatPaginatedResponse([], 0, { page: 1, limit: 10 });
-      }
-    } else if (query.tenantId && query.tenantId !== 'all') {
+    // Optional query-based tenant filter (for super_admin or group narrowing)
+    if (query.tenantId && query.tenantId !== 'all') {
       whereCondition.tenantId = query.tenantId;
     } else if (query.slug && query.slug !== 'all') {
       const t = await prisma.tenant.findFirst({ where: { slug: query.slug } });
@@ -104,10 +91,12 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       ];
     }
 
+    const scopedWhere = applyTenantScope(whereCondition, user);
+
     const [total, items] = await Promise.all([
-      prisma.interestedClient.count({ where: whereCondition }),
+      prisma.interestedClient.count({ where: scopedWhere }),
       prisma.interestedClient.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
@@ -148,27 +137,14 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Get paginated list of Potential Clients (AI Qualified) for tenant (or all for super_admin)
   fastify.get('/potential', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
-    const isSuperAdmin = user.role === 'super_admin';
     const query = (request.query as any) || {};
 
     const { page, limit, skip, sortBy, sortOrder, search } = parsePagination(request, 'confidenceScore', 'desc');
 
     const whereCondition: any = { isDeleted: false };
 
-    if (!isSuperAdmin) {
-      if (query.slug && query.slug !== 'all') {
-        const t = await prisma.tenant.findFirst({ where: { slug: query.slug } });
-        if (t) {
-          whereCondition.tenantId = t.id;
-        } else if (user.tenantId) {
-          whereCondition.tenantId = user.tenantId;
-        }
-      } else if (user.tenantId) {
-        whereCondition.tenantId = user.tenantId;
-      } else {
-        return formatPaginatedResponse([], 0, { page: 1, limit: 10 });
-      }
-    } else if (query.tenantId && query.tenantId !== 'all') {
+    // Optional query-based tenant filter (for super_admin or group narrowing)
+    if (query.tenantId && query.tenantId !== 'all') {
       whereCondition.tenantId = query.tenantId;
     } else if (query.slug && query.slug !== 'all') {
       const t = await prisma.tenant.findFirst({ where: { slug: query.slug } });
@@ -240,10 +216,12 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       ];
     }
 
+    const scopedWhere = applyTenantScope(whereCondition, user);
+
     const [total, items] = await Promise.all([
-      prisma.potentialClient.count({ where: whereCondition }),
+      prisma.potentialClient.count({ where: scopedWhere }),
       prisma.potentialClient.findMany({
-        where: whereCondition,
+        where: scopedWhere,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
@@ -274,7 +252,6 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Get full chat history transcript for an Interested Client
   fastify.get('/:id/conversations', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
-    const isSuperAdmin = user.role === 'super_admin';
 
     const { id } = request.params as { id: string };
     const clientId = parseInt(id, 10);
@@ -283,10 +260,10 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Invalid client ID', 400);
     }
 
+    const scopedWhere = applyTenantScope({ id: clientId, isDeleted: false }, user);
+
     const client = await prisma.interestedClient.findFirst({
-      where: isSuperAdmin
-        ? { id: clientId, isDeleted: false }
-        : { id: clientId, isDeleted: false, ...(user.tenantId ? { tenantId: user.tenantId } : {}) },
+      where: scopedWhere,
       include: {
         PotentialClient: true,
         VisitorSession: true,
@@ -332,7 +309,6 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Soft delete an Interested Client and cascade to associated PotentialClient
   fastify.delete('/interested/:id', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
-    const isSuperAdmin = user.role === 'super_admin';
     const { id } = request.params as { id: string };
     const clientId = parseInt(id, 10);
 
@@ -340,16 +316,10 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Invalid client ID', 400);
     }
 
-    const whereCondition: any = { id: clientId, isDeleted: false };
-    if (!isSuperAdmin) {
-      if (!user.tenantId) {
-        throw new AppError('Tenant unauthorized', 403);
-      }
-      whereCondition.tenantId = user.tenantId;
-    }
+    const scopedWhere = applyTenantScope({ id: clientId, isDeleted: false }, user);
 
     const existing = await prisma.interestedClient.findFirst({
-      where: whereCondition
+      where: scopedWhere
     });
 
     if (!existing) {
@@ -381,7 +351,6 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
   // @desc    Soft delete a Potential Client qualification record
   fastify.delete('/potential/:id', { preHandler: [protect] }, async (request, reply) => {
     const user = request.user!;
-    const isSuperAdmin = user.role === 'super_admin';
     const { id } = request.params as { id: string };
     const potentialClientId = parseInt(id, 10);
 
@@ -389,16 +358,10 @@ export default async function leadsRoutes(fastify: FastifyInstance, options: Fas
       throw new AppError('Invalid potential client ID', 400);
     }
 
-    const whereCondition: any = { id: potentialClientId, isDeleted: false };
-    if (!isSuperAdmin) {
-      if (!user.tenantId) {
-        throw new AppError('Tenant unauthorized', 403);
-      }
-      whereCondition.tenantId = user.tenantId;
-    }
+    const scopedWhere = applyTenantScope({ id: potentialClientId, isDeleted: false }, user);
 
     const existing = await prisma.potentialClient.findFirst({
-      where: whereCondition
+      where: scopedWhere
     });
 
     if (!existing) {

@@ -8,6 +8,7 @@ import { generateEmbedding, chunkText } from '../utils/openai';
 import { randomUUID } from 'crypto';
 import { TenantConfigCache } from '../services/cache/TenantConfigCache';
 import { FirecrawlService } from '../services/ai/FirecrawlService';
+import { applyTenantScope } from '../utils/tenantScope';
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (!a || !b || a.length !== b.length || a.length === 0) return 0;
@@ -31,14 +32,13 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   GET /api/kb/custom
   fastify.get('/custom', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
+    const user = request.user!;
+    const scopedWhere = applyTenantScope({
+      type: { in: ['CUSTOM', 'TEXT'] }
+    }, user);
 
     const entries = await prisma.knowledgeBaseEntry.findMany({
-      where: {
-        tenantId,
-        type: { in: ['CUSTOM', 'TEXT'] }
-      },
+      where: scopedWhere,
       orderBy: { createdAt: 'desc' }
     });
 
@@ -48,6 +48,10 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
   // @route   POST /api/kb/custom
   fastify.post('/custom', { preHandler: [protect, restrictTo('knowledge_base', 'create')] }, async (request, reply) => {
     const tenantId = request.user!.tenantId;
+    if (!tenantId) {
+      throw new AppError('Tenant context missing', 400);
+    }
+
     const { content, fileName } = request.body as any;
 
     if (!content) {
@@ -75,7 +79,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
           id: chunkId,
           content: chunk,
           entryId: entry.id,
-          tenantId: tenantId || null
+          tenantId
         }
       });
 
@@ -91,7 +95,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       }
     }
 
-    TenantConfigCache.invalidate(tenantId || undefined);
+    TenantConfigCache.invalidate(tenantId);
 
     reply.status(201);
     return { status: 'success', data: entry };
@@ -99,14 +103,16 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   PUT /api/kb/custom/:id
   fastify.put('/custom/:id', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const id = parseInt((request.params as any).id);
     const { content, fileName } = request.body as any;
 
     if (isNaN(id)) throw new AppError('Invalid ID', 400);
 
-    const existing = await prisma.knowledgeBaseEntry.findUnique({ where: { id } });
-    if (!existing || (tenantId && existing.tenantId !== tenantId)) {
+    const existing = await prisma.knowledgeBaseEntry.findFirst({
+      where: applyTenantScope({ id }, user)
+    });
+    if (!existing) {
       throw new AppError('Entry not found', 404);
     }
 
@@ -130,7 +136,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
             id: chunkId,
             content: chunk,
             entryId: id,
-            tenantId: tenantId || null
+            tenantId: existing.tenantId
           }
         });
 
@@ -146,24 +152,26 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       }
     }
 
-    TenantConfigCache.invalidate(tenantId || undefined);
+    if (existing.tenantId) TenantConfigCache.invalidate(existing.tenantId);
     return { status: 'success', data: updated };
   });
 
   // @route   DELETE /api/kb/custom/:id
   fastify.delete('/custom/:id', { preHandler: [protect, restrictTo('knowledge_base', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid ID', 400);
 
-    const entry = await prisma.knowledgeBaseEntry.findUnique({ where: { id } });
-    if (!entry || (tenantId && entry.tenantId !== tenantId)) {
+    const entry = await prisma.knowledgeBaseEntry.findFirst({
+      where: applyTenantScope({ id }, user)
+    });
+    if (!entry) {
       throw new AppError('Entry not found', 404);
     }
 
     await prisma.knowledgeBaseEntry.delete({ where: { id } });
-    TenantConfigCache.invalidate(tenantId || undefined);
+    if (entry.tenantId) TenantConfigCache.invalidate(entry.tenantId);
     return { status: 'success', message: 'Entry deleted successfully.' };
   });
 
@@ -173,14 +181,13 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   GET /api/kb/documents
   fastify.get('/documents', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
+    const user = request.user!;
+    const scopedWhere = applyTenantScope({
+      type: { in: ['FILE', 'DOCUMENT'] }
+    }, user);
 
     const documents = await prisma.knowledgeBaseEntry.findMany({
-      where: {
-        tenantId,
-        type: { in: ['FILE', 'DOCUMENT'] }
-      },
+      where: scopedWhere,
       orderBy: { createdAt: 'desc' }
     });
 
@@ -248,13 +255,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   DELETE /api/kb/documents/:id
   fastify.delete('/documents/:id', { preHandler: [protect, restrictTo('knowledge_base', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid ID', 400);
 
-    const entry = await prisma.knowledgeBaseEntry.findUnique({ where: { id } });
-    if (!entry || (tenantId && entry.tenantId !== tenantId)) {
+    const entry = await prisma.knowledgeBaseEntry.findFirst({
+      where: applyTenantScope({ id }, user)
+    });
+    if (!entry) {
       throw new AppError('Document not found', 404);
     }
 
@@ -271,6 +280,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     }
 
     await prisma.knowledgeBaseEntry.delete({ where: { id } });
+    if (entry.tenantId) TenantConfigCache.invalidate(entry.tenantId);
     return { status: 'success', message: 'Document removed successfully.' };
   });
 
@@ -280,11 +290,11 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   GET /api/kb/sitemap
   fastify.get('/sitemap', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) return { status: 'success', data: [] };
+    const user = request.user!;
+    const scopedWhere = applyTenantScope({}, user);
 
     const pages = await prisma.crawledPage.findMany({
-      where: { tenantId },
+      where: scopedWhere,
       orderBy: { createdAt: 'desc' }
     });
 
@@ -307,13 +317,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   PUT /api/kb/sitemap/:id/toggle
   fastify.put('/sitemap/:id/toggle', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid ID', 400);
 
-    const page = await prisma.crawledPage.findUnique({ where: { id } });
-    if (!page || (tenantId && page.tenantId !== tenantId)) {
+    const page = await prisma.crawledPage.findFirst({
+      where: applyTenantScope({ id }, user)
+    });
+    if (!page) {
       throw new AppError('Page not found', 404);
     }
 
@@ -327,13 +339,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   DELETE /api/kb/sitemap/:id
   fastify.delete('/sitemap/:id', { preHandler: [protect, restrictTo('knowledge_base', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const id = parseInt((request.params as any).id);
 
     if (isNaN(id)) throw new AppError('Invalid ID', 400);
 
-    const page = await prisma.crawledPage.findUnique({ where: { id } });
-    if (!page || (tenantId && page.tenantId !== tenantId)) {
+    const page = await prisma.crawledPage.findFirst({
+      where: applyTenantScope({ id }, user)
+    });
+    if (!page) {
       throw new AppError('Page not found', 404);
     }
 
@@ -347,8 +361,8 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   GET /api/kb/system-prompt
   fastify.get('/system-prompt', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const agent = await prisma.agent.findFirst({ where: tenantId ? { tenantId } : {} });
+    const user = request.user!;
+    const agent = await prisma.agent.findFirst({ where: applyTenantScope({}, user) });
 
     return {
       status: 'success',
@@ -360,20 +374,20 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   PUT /api/kb/system-prompt
   fastify.put('/system-prompt', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { systemPrompt } = request.body as any;
 
     if (!systemPrompt) throw new AppError('System prompt is required.', 400);
 
-    const agent = await prisma.agent.findFirst({ where: tenantId ? { tenantId } : {} });
+    const agent = await prisma.agent.findFirst({ where: applyTenantScope({}, user) });
     if (agent) {
       await prisma.agent.update({
         where: { id: agent.id },
         data: { systemPrompt, updatedAt: new Date() }
       });
+      if (agent.tenantId) TenantConfigCache.invalidate(agent.tenantId);
     }
 
-    TenantConfigCache.invalidate(tenantId || undefined);
     return { status: 'success', message: 'System prompt updated successfully.' };
   });
 
@@ -383,10 +397,11 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   GET /api/kb/persona
   fastify.get('/persona', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
+    const tenantId = user.tenantId;
 
     let persona = await prisma.persona.findFirst({
-      where: tenantId ? { tenantId } : {},
+      where: applyTenantScope({}, user),
       include: {
         PersonaVersion_Persona_activeVersionIdToPersonaVersion: true,
         PersonaVersion_PersonaVersion_personaIdToPersona: {
@@ -427,7 +442,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       });
 
       persona = await prisma.persona.findFirst({
-        where: tenantId ? { tenantId } : {},
+        where: applyTenantScope({}, user),
         include: {
           PersonaVersion_Persona_activeVersionIdToPersonaVersion: true,
           PersonaVersion_PersonaVersion_personaIdToPersona: { orderBy: { version: 'desc' } }
@@ -440,14 +455,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   POST /api/kb/persona/versions
   fastify.post('/persona/versions', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
+    const tenantId = user.tenantId;
     const { name, tone, language, instructions } = request.body as any;
 
     if (!name || !instructions) {
       throw new AppError('Name and instructions are required.', 400);
     }
 
-    let persona = await prisma.persona.findFirst({ where: tenantId ? { tenantId } : {} });
+    let persona = await prisma.persona.findFirst({ where: applyTenantScope({}, user) });
     if (!persona) {
       persona = await prisma.persona.create({
         data: { id: randomUUID(), tenantId: tenantId || null, updatedAt: new Date() }
@@ -480,7 +496,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   PUT /api/kb/persona/versions/:id
   fastify.put('/persona/versions/:id', { preHandler: [protect, restrictTo('knowledge_base', 'edit')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const versionId = (request.params as any).id;
     const { name, tone, language, instructions } = request.body as any;
 
@@ -489,7 +505,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       include: { Persona_PersonaVersion_personaIdToPersona: true }
     });
 
-    if (!ver || (tenantId && ver.Persona_PersonaVersion_personaIdToPersona.tenantId !== tenantId)) {
+    if (!ver) {
+      throw new AppError('Persona version not found', 404);
+    }
+
+    // Verify persona belongs to scoped tenant
+    const scopedPersona = await prisma.persona.findFirst({
+      where: applyTenantScope({ id: ver.personaId }, user)
+    });
+    if (!scopedPersona) {
       throw new AppError('Persona version not found', 404);
     }
 
@@ -503,13 +527,13 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       }
     });
 
-    TenantConfigCache.invalidate(tenantId || undefined);
+    if (scopedPersona.tenantId) TenantConfigCache.invalidate(scopedPersona.tenantId);
     return { status: 'success', data: updatedVer };
   });
 
   // @route   PUT /api/kb/persona/versions/:id/activate
   fastify.put('/persona/versions/:id/activate', { preHandler: [protect, restrictTo('knowledge_base', 'manage')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const versionId = (request.params as any).id;
 
     const ver = await prisma.personaVersion.findUnique({
@@ -517,7 +541,14 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
       include: { Persona_PersonaVersion_personaIdToPersona: true }
     });
 
-    if (!ver || (tenantId && ver.Persona_PersonaVersion_personaIdToPersona.tenantId !== tenantId)) {
+    if (!ver) {
+      throw new AppError('Persona version not found', 404);
+    }
+
+    const scopedPersona = await prisma.persona.findFirst({
+      where: applyTenantScope({ id: ver.personaId }, user)
+    });
+    if (!scopedPersona) {
       throw new AppError('Persona version not found', 404);
     }
 
@@ -545,7 +576,7 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
 
   // @route   POST /api/kb/search-tester
   fastify.post('/search-tester', { preHandler: [protect, restrictTo('knowledge_base', 'view')] }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { query } = request.body as any;
 
     if (!query) throw new AppError('Search query is required.', 400);
@@ -556,21 +587,15 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     // 2. Fetch Knowledge Base Items and Sitemap Pages
     const [kbEntries, sitemapPages, docChunks] = await Promise.all([
       prisma.knowledgeBaseEntry.findMany({
-        where: {
-          ...(tenantId ? { tenantId } : {}),
-        },
+        where: applyTenantScope({}, user),
         take: 20
       }),
       prisma.crawledPage.findMany({
-        where: {
-          ...(tenantId ? { tenantId } : {}),
-        },
+        where: applyTenantScope({}, user),
         take: 20
       }),
       prisma.documentChunk.findMany({
-        where: {
-          ...(tenantId ? { tenantId } : {}),
-        },
+        where: applyTenantScope({}, user),
         take: 30
       })
     ]);

@@ -4,8 +4,15 @@ const JWT_SECRET = process.env.JWT_SECRET || 'v3c-super-secret-jwt-key-2026';
 
 export interface TokenPayload {
   userId: number;
+  id?: number;
+  email?: string;
+  name?: string;
   tenantId: string | null;
+  activeTenantId?: string | null;
+  groupId?: string | null;
+  departmentId?: string | null;
   role: string;
+  roleLevel?: string | null;
   permissions: string[];
 }
 

@@ -125,8 +125,14 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     // Create session token
     const tokenPayload = {
       userId: result.user.id,
+      id: result.user.id,
+      name: result.user.name,
+      email: result.user.email,
       tenantId: result.tenant.id,
+      groupId: result.tenant.groupId || null,
+      departmentId: result.user.departmentId || null,
       role: 'manager',
+      roleLevel: managerRole.level || 'L2_COMPANY',
       permissions
     };
     const token = signToken(tokenPayload);
@@ -165,7 +171,10 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           name: result.user.name,
           email: result.user.email,
           role: 'manager',
+          roleLevel: managerRole.level || 'L2_COMPANY',
           tenantId: result.tenant.id,
+          groupId: result.tenant.groupId || null,
+          departmentId: result.user.departmentId || null,
           tenantSlug: result.tenant.slug,
           companyName: result.tenant.name
         },
@@ -186,7 +195,10 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     // Find user
     const user = await prisma.user.findUnique({
       where: { email },
-      include: { Tenant: true }
+      include: {
+        Tenant: true,
+        department: true
+      }
     });
 
     if (!user || user.status !== 'active' || !(await bcrypt.compare(password, user.password))) {
@@ -203,12 +215,27 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
       throw new AppError('No roles assigned to this user.', 403);
     }
 
-    // Get primary role (prefer super_admin, then manager, then member)
+    // Get primary role and level (L0_PLATFORM > L1_GROUP > L2_COMPANY > L3_DEPARTMENT > L4_AGENT)
     let primaryRole = 'member';
-    if (userRoles.some(ur => ur.Role.name === 'super_admin')) {
+    let primaryRoleLevel: string = 'L4_AGENT';
+
+    if (userRoles.some(ur => ur.Role.name === 'super_admin' || ur.Role.level === 'L0_PLATFORM')) {
       primaryRole = 'super_admin';
-    } else if (userRoles.some(ur => ur.Role.name === 'manager')) {
+      primaryRoleLevel = 'L0_PLATFORM';
+    } else if (userRoles.some(ur => ur.Role.level === 'L1_GROUP')) {
+      const groupRole = userRoles.find(ur => ur.Role.level === 'L1_GROUP')!;
+      primaryRole = groupRole.Role.name;
+      primaryRoleLevel = 'L1_GROUP';
+    } else if (userRoles.some(ur => ur.Role.name === 'manager' || ur.Role.level === 'L2_COMPANY')) {
       primaryRole = 'manager';
+      primaryRoleLevel = 'L2_COMPANY';
+    } else if (userRoles.some(ur => ur.Role.level === 'L3_DEPARTMENT')) {
+      const deptRole = userRoles.find(ur => ur.Role.level === 'L3_DEPARTMENT')!;
+      primaryRole = deptRole.Role.name;
+      primaryRoleLevel = 'L3_DEPARTMENT';
+    } else if (userRoles.length > 0) {
+      primaryRole = userRoles[0].Role.name;
+      primaryRoleLevel = userRoles[0].Role.level || 'L4_AGENT';
     }
 
     // Get role IDs
@@ -221,11 +248,17 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     });
     const permissions = rolePermissions.map(rp => `${rp.Permission.resource}:${rp.Permission.action}`);
 
-    // Create session token
+    // Create session token with hierarchy payload
     const tokenPayload = {
       userId: user.id,
+      id: user.id,
+      name: user.name,
+      email: user.email,
       tenantId: user.tenantId,
+      groupId: user.Tenant?.groupId || null,
+      departmentId: user.departmentId || null,
       role: primaryRole,
+      roleLevel: primaryRoleLevel,
       permissions
     };
     const token = signToken(tokenPayload, rememberMe);
@@ -272,7 +305,10 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           name: user.name,
           email: user.email,
           role: primaryRole,
+          roleLevel: primaryRoleLevel,
           tenantId: user.tenantId,
+          groupId: user.Tenant?.groupId || null,
+          departmentId: user.departmentId || null,
           tenantSlug: user.Tenant?.slug || 'v3c-system-tenant',
           domainId: user.domainId,
           companyName: user.Tenant?.name || null
@@ -306,12 +342,17 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
     const userPayload = request.user!;
     const user = await prisma.user.findUnique({
       where: { id: userPayload.userId },
-      include: { Tenant: true }
+      include: {
+        Tenant: true,
+        department: true
+      }
     });
 
     if (!user || user.status !== 'active') {
       return { status: 'success', data: null };
     }
+
+    const roleLevel = userPayload.roleLevel || (userPayload.role === 'super_admin' ? 'L0_PLATFORM' : 'L4_AGENT');
 
     return {
       status: 'success',
@@ -322,7 +363,10 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
           name: user.name,
           email: user.email,
           role: userPayload.role,
+          roleLevel,
           tenantId: user.tenantId,
+          groupId: user.Tenant?.groupId || userPayload.groupId || null,
+          departmentId: user.departmentId || userPayload.departmentId || null,
           tenantSlug: user.Tenant?.slug || 'v3c-system-tenant',
           domainId: user.domainId,
           companyName: user.Tenant?.name || null,
@@ -440,4 +484,42 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
       message: 'Password reset successfully. Please log in with your new password.'
     };
   });
+
+  // @route   GET /api/auth/accessible-tenants
+  // @desc    Returns list of tenants the current user can access based on hierarchy
+  fastify.get('/accessible-tenants', { preHandler: protect }, async (request, reply) => {
+    const user = request.user!;
+    const roleLevel = user.roleLevel || (user.role === 'super_admin' ? 'L0_PLATFORM' : 'L4_AGENT');
+
+    let tenants: { id: string; name: string; slug: string; status: string }[] = [];
+
+    if (roleLevel === 'L0_PLATFORM') {
+      tenants = await prisma.tenant.findMany({
+        select: { id: true, name: true, slug: true, status: true },
+        orderBy: { name: 'asc' }
+      });
+    } else if (roleLevel === 'L1_GROUP') {
+      tenants = user.groupId
+        ? await prisma.tenant.findMany({
+            where: { groupId: user.groupId },
+            select: { id: true, name: true, slug: true, status: true },
+            orderBy: { name: 'asc' }
+          })
+        : [];
+    } else {
+      if (user.tenantId) {
+        const tenant = await prisma.tenant.findUnique({
+          where: { id: user.tenantId },
+          select: { id: true, name: true, slug: true, status: true }
+        });
+        if (tenant) tenants = [tenant];
+      }
+    }
+
+    return {
+      status: 'success',
+      data: tenants
+    };
+  });
 }
+

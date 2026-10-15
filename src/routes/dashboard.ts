@@ -1,36 +1,25 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
+import { applyTenantScope } from '../utils/tenantScope';
 
 export default async function dashboardRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/dashboard/stats
   // @desc    Get dashboard metrics (conversations, active agents, leads, quota usage)
   fastify.get('/stats', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
 
-    if (!tenantId) {
-      return {
-        status: 'success',
-        data: {
-          conversationsCount: 0,
-          activeAgentsCount: 0,
-          leadsCount: 0,
-          subscription: null
-        }
-      };
-    }
-
-    // 1. Get counts from DB
+    // 1. Get counts from DB scoped to tenant hierarchy
     const [conversationsCount, activeAgentsCount, leadsCount] = await Promise.all([
-      prisma.conversation.count({ where: { tenantId } }),
-      prisma.agent.count({ where: { tenantId, isActive: true } }),
-      prisma.lead.count({ where: { tenantId } })
+      prisma.conversation.count({ where: applyTenantScope({}, user) }),
+      prisma.agent.count({ where: applyTenantScope({ isActive: true }, user) }),
+      prisma.lead.count({ where: applyTenantScope({}, user) })
     ]);
 
     // 2. Get active subscription plan profile
     const subscription = await prisma.adminProfile.findFirst({
-      where: { tenantId },
+      where: applyTenantScope({}, user),
       orderBy: { createdAt: 'desc' }
     });
 
@@ -57,27 +46,19 @@ export default async function dashboardRoutes(fastify: FastifyInstance, options:
   // @route   GET /api/dashboard/visitors
   // @desc    Get visitors count / daily conversations count over the last 30 days
   fastify.get('/visitors', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-
-    if (!tenantId) {
-      return {
-        status: 'success',
-        data: []
-      };
-    }
+    const user = request.user!;
 
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     thirtyDaysAgo.setHours(0, 0, 0, 0);
 
-    // Fetch conversation times for the past 30 days
+    // Fetch conversation times for the past 30 days scoped to hierarchy
     const conversations = await prisma.conversation.findMany({
-      where: {
-        tenantId,
+      where: applyTenantScope({
         createdAt: {
           gte: thirtyDaysAgo
         }
-      },
+      }, user),
       select: {
         createdAt: true
       },

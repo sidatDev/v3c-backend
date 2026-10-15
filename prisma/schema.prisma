@@ -8,6 +8,19 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+enum RoleLevel {
+  L0_PLATFORM
+  L1_GROUP
+  L2_COMPANY
+  L3_DEPARTMENT
+  L4_AGENT
+}
+
 model AdminProfile {
   id                        Int             @id @default(autoincrement())
   userId                    Int             @unique
@@ -618,6 +631,29 @@ model TeamMember {
   @@index([userId])
 }
 
+model Group {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  status    Status   @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tenants   Tenant[]
+}
+
+model Department {
+  id        String   @id @default(uuid())
+  name      String
+  status    Status   @default(ACTIVE)
+  tenantId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  Tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users     User[]
+
+  @@index([tenantId])
+}
+
 model Tenant {
   id                     String                   @id
   name                   String
@@ -625,6 +661,9 @@ model Tenant {
   status                 String                   @default("active")
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime
+  groupId                String?
+  group                  Group?                   @relation(fields: [groupId], references: [id])
+  departments            Department[]
   AdminProfile           AdminProfile[]
   Agent                  Agent[]
   AuditLog               AuditLog[]
@@ -666,6 +705,8 @@ model Tenant {
   AiLog                  AiLog[]
   InterestedClient       InterestedClient[]
   PotentialClient        PotentialClient[]
+
+  @@index([groupId])
 }
 
 model TenantLimit {
@@ -702,6 +743,8 @@ model User {
   authNetCustomerProfileId String?
   authNetPaymentProfiles   Json?
   tenantId                 String?
+  departmentId             String?
+  department               Department?      @relation(fields: [departmentId], references: [id])
   AdminProfile             AdminProfile?
   AuditLog                 AuditLog[]
   Lead                     Lead[]
@@ -716,6 +759,7 @@ model User {
   UserRole                 UserRole[]
 
   @@index([createdAt])
+  @@index([departmentId])
   @@index([domainId])
   @@index([email])
   @@index([role])
@@ -938,6 +982,7 @@ model Role {
   description    String?
   tenantId       String?
   isSystem       Boolean          @default(false)
+  level          RoleLevel        @default(L4_AGENT)
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   Tenant         Tenant?          @relation(fields: [tenantId], references: [id])

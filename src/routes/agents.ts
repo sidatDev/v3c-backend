@@ -4,19 +4,18 @@ import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { TenantConfigCache } from '../services/cache/TenantConfigCache';
+import { applyTenantScope, effectiveTenantId } from '../utils/tenantScope';
 
 export default async function agentsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
   // @route   GET /api/agents
   // @desc    List all agents for tenant
   fastify.get('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    if (!tenantId) {
-      return { status: 'success', data: [] };
-    }
+    const user = request.user!;
+    const scopedWhere = applyTenantScope({}, user);
 
     const agents = await prisma.agent.findMany({
-      where: { tenantId },
+      where: scopedWhere,
       include: {
         RetrievalConfig: true,
         AgentTopicLink: {
@@ -38,11 +37,13 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/agents/:id
   // @desc    Get agent detail
   fastify.get('/:id', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id } = request.params as { id: string };
 
+    const scopedWhere = applyTenantScope({ id }, user);
+
     const agent = await prisma.agent.findFirst({
-      where: { id, tenantId: tenantId || undefined },
+      where: scopedWhere,
       include: {
         RetrievalConfig: true,
         AgentTopicLink: {
@@ -65,7 +66,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   POST /api/agents
   // @desc    Create a new AI Agent
   fastify.post('/', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const tenantId = effectiveTenantId(request.user);
     if (!tenantId) {
       throw new AppError('Tenant required', 400);
     }
@@ -122,12 +123,14 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   PUT /api/agents/:id
   // @desc    Update agent profile & settings
   fastify.put('/:id', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id } = request.params as { id: string };
     const body = request.body as any;
 
+    const scopedWhere = applyTenantScope({ id }, user);
+
     const existing = await prisma.agent.findFirst({
-      where: { id, tenantId: tenantId || undefined }
+      where: scopedWhere
     });
 
     if (!existing) {
@@ -163,7 +166,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
       }
     });
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (existing.tenantId) TenantConfigCache.invalidate(existing.tenantId);
 
     return {
       status: 'success',
@@ -174,11 +177,13 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   DELETE /api/agents/:id
   // @desc    Delete agent
   fastify.delete('/:id', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id } = request.params as { id: string };
 
+    const scopedWhere = applyTenantScope({ id }, user);
+
     const existing = await prisma.agent.findFirst({
-      where: { id, tenantId: tenantId || undefined }
+      where: scopedWhere
     });
 
     if (!existing) {
@@ -186,7 +191,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
     }
 
     await prisma.agent.delete({ where: { id } });
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (existing.tenantId) TenantConfigCache.invalidate(existing.tenantId);
 
     return {
       status: 'success',
@@ -197,18 +202,26 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/agents/:id/retrieval-config
   // @desc    Get retrieval configuration for agent
   fastify.get('/:id/retrieval-config', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id: agentId } = request.params as { id: string };
+
+    const agent = await prisma.agent.findFirst({
+      where: applyTenantScope({ id: agentId }, user)
+    });
+
+    if (!agent) {
+      throw new AppError('Agent not found', 404);
+    }
 
     let config = await prisma.retrievalConfig.findUnique({
       where: { agentId }
     });
 
-    if (!config && tenantId) {
+    if (!config && agent.tenantId) {
       config = await prisma.retrievalConfig.create({
         data: {
           agentId,
-          tenantId,
+          tenantId: agent.tenantId,
           similarityThreshold: 0.3,
           topK: 5,
           maxContextTokens: 1000,
@@ -229,15 +242,23 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   PUT /api/agents/:id/retrieval-config
   // @desc    Update retrieval configuration for agent
   fastify.put('/:id/retrieval-config', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id: agentId } = request.params as { id: string };
     const body = request.body as any;
+
+    const agent = await prisma.agent.findFirst({
+      where: applyTenantScope({ id: agentId }, user)
+    });
+
+    if (!agent) {
+      throw new AppError('Agent not found', 404);
+    }
 
     const config = await prisma.retrievalConfig.upsert({
       where: { agentId },
       create: {
         agentId,
-        tenantId: tenantId!,
+        tenantId: agent.tenantId,
         similarityThreshold: body.similarityThreshold !== undefined ? Number(body.similarityThreshold) : 0.3,
         topK: body.topK !== undefined ? Number(body.topK) : 5,
         maxContextTokens: body.maxContextTokens !== undefined ? Number(body.maxContextTokens) : 1000,
@@ -262,7 +283,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
       }
     });
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (agent.tenantId) TenantConfigCache.invalidate(agent.tenantId);
 
     return {
       status: 'success',
@@ -273,7 +294,16 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   GET /api/agents/:id/topic-links
   // @desc    Get topic links for agent
   fastify.get('/:id/topic-links', { preHandler: protect }, async (request, reply) => {
+    const user = request.user!;
     const { id: agentId } = request.params as { id: string };
+
+    const agent = await prisma.agent.findFirst({
+      where: applyTenantScope({ id: agentId }, user)
+    });
+
+    if (!agent) {
+      throw new AppError('Agent not found', 404);
+    }
 
     const links = await prisma.agentTopicLink.findMany({
       where: { agentId },
@@ -289,14 +319,24 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   POST /api/agents/:id/topic-links
   // @desc    Add a topic link for agent (or bulk import from CrawledPages)
   fastify.post('/:id/topic-links', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
+    const user = request.user!;
     const { id: agentId } = request.params as { id: string };
     const body = request.body as any;
+
+    const agent = await prisma.agent.findFirst({
+      where: applyTenantScope({ id: agentId }, user)
+    });
+
+    if (!agent) {
+      throw new AppError('Agent not found', 404);
+    }
+
+    const tenantId = agent.tenantId;
 
     if (body.importFromKb) {
       // Bulk import from CrawledPage entries
       const pages = await prisma.crawledPage.findMany({
-        where: { tenantId: tenantId!, enabled: true },
+        where: applyTenantScope({ enabled: true }, user),
         take: body.limit || 5
       });
 
@@ -306,7 +346,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         const link = await prisma.agentTopicLink.create({
           data: {
             agentId,
-            tenantId: tenantId!,
+            tenantId,
             crawledPageId: p.id,
             title: p.title || p.url.replace(/^https?:\/\//, ''),
             url: p.url,
@@ -328,7 +368,7 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
     const link = await prisma.agentTopicLink.create({
       data: {
         agentId,
-        tenantId: tenantId!,
+        tenantId,
         crawledPageId: body.crawledPageId || null,
         title: body.title,
         url: body.url,
@@ -348,14 +388,30 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
   // @route   DELETE /api/agents/:id/topic-links/:linkId
   // @desc    Delete topic link
   fastify.delete('/:id/topic-links/:linkId', { preHandler: protect }, async (request, reply) => {
-    const tenantId = request.user!.tenantId;
-    const { linkId } = request.params as { id: string; linkId: string };
+    const user = request.user!;
+    const { id: agentId, linkId } = request.params as { id: string; linkId: string };
+
+    const agent = await prisma.agent.findFirst({
+      where: applyTenantScope({ id: agentId }, user)
+    });
+
+    if (!agent) {
+      throw new AppError('Agent not found', 404);
+    }
+
+    const link = await prisma.agentTopicLink.findFirst({
+      where: { id: linkId, agentId }
+    });
+
+    if (!link) {
+      throw new AppError('Topic link not found', 404);
+    }
 
     await prisma.agentTopicLink.delete({
       where: { id: linkId }
     });
 
-    if (tenantId) TenantConfigCache.invalidate(tenantId);
+    if (agent.tenantId) TenantConfigCache.invalidate(agent.tenantId);
 
     return {
       status: 'success',
