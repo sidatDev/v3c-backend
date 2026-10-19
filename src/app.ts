@@ -41,6 +41,7 @@ const allowedOrigins: (string | RegExp)[] = [
   'http://127.0.0.1:5173',
   /\.vercel\.app$/,
   /\.sidattech\.com$/
+  /\.sidatsuite\.com$/
 ];
 
 if (process.env.ADMIN_PANEL_URL) {
