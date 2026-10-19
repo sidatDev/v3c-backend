@@ -128,13 +128,13 @@ export class ChatService {
 
     let contextDirective: string;
     if (retrievalResult.fallbackTriggered && !retrievalResult.contextText) {
-      if (isFollowUp || hasServiceKeyword) {
-        contextDirective = `[QUERY — GENERAL ASSISTANCE]: Answer the user's query naturally and accurately in ${language} regarding ${agent.name} products, services, and solutions.`;
+      if (isFollowUp) {
+        contextDirective = `[QUERY — FOLLOW-UP ASSISTANCE]: Answer the follow-up query naturally in ${language} regarding ${agent.name} services using previous conversation context. If the query is unrelated to ${agent.name}, politely refuse.`;
       } else {
-        contextDirective = `[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is unrelated to ${agent.name}'s services. You MUST politely refuse in ${language}. State clearly that you are the AI assistant for ${agent.name} and can only assist with ${agent.name}'s services, products, and business solutions.`;
+        contextDirective = `[STRICT OUT-OF-SCOPE REFUSAL]: The query is unrelated to ${agent.name}'s services or has no matching records in our knowledge base. You MUST politely refuse in ${language}. State clearly that you are the AI assistant for ${agent.name} and can only assist with ${agent.name}'s officially documented services. Do NOT answer unrelated topics (e.g. medical, dental, recipes, coding, or other businesses) using outside training memory.`;
       }
     } else {
-      contextDirective = retrievalResult.contextText;
+      contextDirective = `[STRICT GROUNDING DIRECTIVE — Answer ONLY using this official ${agent.name} knowledge context. If the query is outside ${agent.name}'s domain or not supported by this context, politely decline rather than answering from external memory]:\n${retrievalResult.contextText}`;
     }
 
     const messages = PromptService.buildMessages({

@@ -47,6 +47,7 @@ export class RetrievalService {
     let embeddingMs = 0;
     let vectorSearchMs = 0;
 
+    let vectorSearchError = false;
     try {
       // ── Phase 1: Generate embedding ─────────────────────────────────────────
       const tEmbed0 = Date.now();
@@ -93,39 +94,39 @@ export class RetrievalService {
             }
           }
         }
+      } else {
+        vectorSearchError = true;
       }
     } catch (err: any) {
+      vectorSearchError = true;
       StructuredLogger.warn('[RetrievalService] Vector search failed', {
         tenantId,
         error: err?.message || err
       });
     }
 
-    // Fallback or Additional KB inclusion: If vector search returned 0 results or low results
-    if (chunks.length < topK) {
+    // Emergency fail-safe ONLY if vector search failed/errored completely
+    if (vectorSearchError && chunks.length === 0) {
       try {
         const kbEntries = await prisma.knowledgeBaseEntry.findMany({
           where: { tenantId, enabled: true },
           orderBy: { createdAt: 'desc' },
-          take: 15
+          take: 5
         });
 
         for (const entry of kbEntries) {
           if (entry.content && entry.content.trim()) {
             const title = entry.fileName || 'Custom Knowledge Snippet';
-            const alreadyPushed = chunks.some(c => c.content === entry.content);
-            if (!alreadyPushed) {
-              chunks.push({
-                content: entry.content,
-                similarity: 0.8,
-                sourceTitle: title
-              });
-              sourcesMap.set(title, { title });
-            }
+            chunks.push({
+              content: entry.content,
+              similarity: 0.5,
+              sourceTitle: title
+            });
+            sourcesMap.set(title, { title });
           }
         }
       } catch (err: any) {
-        StructuredLogger.error('[RetrievalService] Fallback KB fetch failed', {
+        StructuredLogger.error('[RetrievalService] Fail-safe KB fetch failed', {
           tenantId,
           error: err?.message || err
         });

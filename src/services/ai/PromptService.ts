@@ -73,15 +73,21 @@ export class PromptService {
 
     let promptParts: string[] = [];
 
-    // 1. Base System Prompt (<2000 tokens / 8000 chars)
-    promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 2000)}`);
+    // 1. Base System Prompt (<6000 tokens / 24000 chars to avoid truncating detailed enterprise prompts)
+    promptParts.push(`### System Role & Instructions:\n${capTokens(basePrompt, 6000)}`);
 
     // 2. Language & Gender Constraints
     promptParts.push(`### Language & Gender Rules:\n${langInstruction}\n\n${genderInstruction}`);
 
-    // 3. Guardrails & Policy Protocol (~200 tokens)
+    // 3. Strict Domain & Out-of-Scope Boundary Guard
+    promptParts.push(`### MANDATORY DOMAIN & OUT-OF-SCOPE BOUNDARY:
+1. You are strictly and exclusively the customer support assistant for ${tenantName}.
+2. You must NEVER answer questions about unrelated topics (e.g. medical, dental, doctors, health treatments, general programming, cooking, entertainment, outside commercial businesses, or general trivia) using external training knowledge.
+3. If the user asks about anything outside ${tenantName}'s domain or services, you MUST politely refuse in the active language and state that you can only assist with ${tenantName} services.`);
+
+    // 4. Guardrails & Policy Protocol (~400 tokens)
     if (guardrailsPrompt && guardrailsPrompt.trim()) {
-      promptParts.push(`### Safety, Guardrails & Policy Protocol:\n${capTokens(guardrailsPrompt, 200)}`);
+      promptParts.push(`### Safety, Guardrails & Policy Protocol:\n${capTokens(guardrailsPrompt, 400)}`);
     }
 
     // 5. Conversation Summary (if exists from rolling memory, <300 tokens)
@@ -99,13 +105,14 @@ export class PromptService {
 5. If a question is outside our official Knowledge Base or asks about non-company topics/competitors, output the designated fallback refusal.`);
     }
 
-    // 7. Ground Truth Retrieved Context (RAG, <1000 tokens)
+    // 7. Ground Truth Retrieved Context (RAG, <1500 tokens)
     if (retrievedContext && retrievedContext.trim()) {
       promptParts.push(`### CRITICAL RULE — Knowledge Base Ground Context (STRICT GROUNDING):\n` +
         `You have been provided with official reference knowledge below. You MUST:\n` +
         `1. Answer using ONLY official ${tenantName} information from this knowledge base.\n` +
-        `2. Reproduce exact details without making up services or referencing non-${tenantName} entities.\n\n` +
-        `Knowledge Base Content:\n${capTokens(retrievedContext, 1000)}`);
+        `2. Reproduce exact details without making up services or referencing non-${tenantName} entities.\n` +
+        `3. If the user's question cannot be answered using this ${tenantName} context, politely decline rather than using outside training memory.\n\n` +
+        `Knowledge Base Content:\n${capTokens(retrievedContext, 1500)}`);
     } else {
       promptParts.push(`### Knowledge Base Context:\nNo specific reference knowledge found for this query.`);
     }

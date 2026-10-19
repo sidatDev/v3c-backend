@@ -665,8 +665,9 @@ export class RealtimeSessionManager {
           ? (isFemaleVoiceTurn ? `[RESPOND 100% IN URDU — FEMALE VERBS ONLY]` : `[RESPOND 100% IN URDU — MALE VERBS ONLY]`)
           : `[RESPOND 100% IN ENGLISH]`;
 
-        const INSURANCE_KEYWORDS = /\b(insurance|insur|claim|claims|policy|policies|premium|motor|health|travel|marine|fire|engineering|corporate|accident|theft|comprehensive|third.?party|coverage|renewal|renew|hospital|medical|baggage|cargo|indemnity|liability|انشورنس|کلیم|پالیسی|موٹر|ہیلتھ|ٹریول|گاڑی|ایکسیڈنٹ|چوری|ہسپتال|میڈیکل|بیمہ|سامان|کارگو|آگ|فائر|سمندری|انجینئرنگ|کمپریہنسیو|تھرڈ|پارٹی|کوریج|ری?نیوال|پریمیم)\b/i;
-        const hasInsuranceKeyword = INSURANCE_KEYWORDS.test(userSpeech);
+        const fallbackText = isUrdu
+          ? this.tenantConfig.agent.RetrievalConfig?.fallbackMessageUrdu || `معذرت، میں صرف ${agentName} کی خدمات اور معلومات میں مدد کر سکتی ہوں۔`
+          : this.tenantConfig.agent.RetrievalConfig?.fallbackMessage || `I can only assist with official ${agentName} services. How may I help you with ${agentName} today?`;
 
         if (retrieval.fallbackTriggered) {
           const isFollowUp = !!this.lastUserTurn && (
@@ -674,10 +675,8 @@ export class RealtimeSessionManager {
             /\b(it|other|others|this|that|also|more|cost|price|details|besides|difference|compare|dono|doosri|doosra|elawa|alawa|aur|batao|konsa|konsi|mazeed|pehla|dosra|teesra|farq|muqabla|دوسرا|دوسری|علاوہ|اور|بتاؤ|مزید|پہلا|تیسرا|فرق|مقابلہ|درمیان|ڈیفرنس)\b/i.test(userSpeech)
           );
 
-          if (isFollowUp || hasInsuranceKeyword) {
-            const directive = hasInsuranceKeyword && !isFollowUp
-              ? `[INSURANCE QUERY — LOW RETRIEVAL MATCH]: The user asked about ${agentName} insurance services but no exact chunk matched. Answer helpfully in ${detectedLanguage} using product knowledge.`
-              : `[TURN DIRECTIVE]: Answer the follow-up query naturally in ${detectedLanguage} using conversation history regarding ${agentName} services.`;
+          if (isFollowUp) {
+            const directive = `[FOLLOW-UP DIRECTIVE]: Answer the follow-up query naturally in ${detectedLanguage} using conversation history regarding ${agentName} services. If the question is outside ${agentName}'s services, politely refuse: "${fallbackText}"`;
 
             this.sendResponseCreate({
               type: 'response.create',
@@ -689,7 +688,7 @@ export class RealtimeSessionManager {
             this.sendResponseCreate({
               type: 'response.create',
               response: {
-                instructions: `${langGenderMandate}${warning70Directive}\n[STRICT OUT-OF-SCOPE DIRECTIVE]: The query is NOT related to insurance. Politely refuse in ${detectedLanguage}. State clearly that you are the assistant for ${agentName}.`,
+                instructions: `${langGenderMandate}${warning70Directive}\n[STRICT OUT-OF-SCOPE REFUSAL]: The user's query is outside ${agentName}'s services. You MUST refuse politely in ${detectedLanguage}. State clearly: "${fallbackText}"`,
               },
             });
           }
@@ -698,7 +697,7 @@ export class RealtimeSessionManager {
           this.sendResponseCreate({
             type: 'response.create',
             response: {
-              instructions: `${langGenderMandate}${warning70Directive}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer clearly in ${detectedLanguage} using this official ${agentName} knowledge base context]:\n${contextOnly}`,
+              instructions: `${langGenderMandate}${warning70Directive}\n[KNOWLEDGE CONTEXT FOR THIS TURN ONLY — Answer clearly in ${detectedLanguage} using ONLY this official ${agentName} knowledge base context. If the query asks for unrelated outside knowledge like medical, dental, coding, recipes, or other businesses, strictly refuse]:\n${contextOnly}`,
             },
           });
         }
