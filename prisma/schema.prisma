@@ -63,6 +63,8 @@ model Agent {
   elevenlabsApiKey       String?
   elevenlabsVoiceId      String?
   isActive               Boolean          @default(true)
+  type                   String?          @default("general")
+  isDefault              Boolean          @default(false)
   voipEnabled            Boolean          @default(false)
   phoneNumber            String?          @unique
   voipApiKey             String?
@@ -98,25 +100,32 @@ model Agent {
   RetrievalConfig        RetrievalConfig?
   AgentTopicLink         AgentTopicLink[]
   InterestedClient       InterestedClient[]
+  knowledgeBaseId        String?
+  KnowledgeBase          KnowledgeBase?   @relation(fields: [knowledgeBaseId], references: [id])
 
   @@index([domainId])
+  @@index([knowledgeBaseId])
   @@index([phoneNumber])
   @@index([tenantId])
 }
 
 model AuditLog {
-  id           String   @id
+  id           String    @id
   userId       Int?
   tenantId     String?
   action       String
   resourceType String
   resourceId   String?
+  entity       String?
+  entityId     String?
+  changeDiff   Json?
   details      Json?
   ipAddress    String?
   userAgent    String?
-  createdAt    DateTime @default(now())
-  Tenant       Tenant?  @relation(fields: [tenantId], references: [id])
-  User         User?    @relation(fields: [userId], references: [id])
+  timestamp    DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  Tenant       Tenant?   @relation(fields: [tenantId], references: [id])
+  User         User?     @relation(fields: [userId], references: [id])
 
   @@index([action])
   @@index([createdAt])
@@ -705,6 +714,10 @@ model Tenant {
   AiLog                  AiLog[]
   InterestedClient       InterestedClient[]
   PotentialClient        PotentialClient[]
+  Secret                 Secret[]
+  Escalation             Escalation[]
+  KnowledgeBase          KnowledgeBase[]
+  Usage                  Usage[]
 
   @@index([groupId])
 }
@@ -745,9 +758,12 @@ model User {
   tenantId                 String?
   departmentId             String?
   department               Department?      @relation(fields: [departmentId], references: [id])
+  mfaSecret                String?
+  mfaEnabled               Boolean          @default(false)
   AdminProfile             AdminProfile?
   AuditLog                 AuditLog[]
   Lead                     Lead[]
+  RefreshToken             RefreshToken[]
   Subscription             Subscription[]
   TeamMember               TeamMember[]
   Domain                   Domain?          @relation(fields: [domainId], references: [id])
@@ -1151,3 +1167,114 @@ model PotentialClient {
   @@index([createdAt])
   @@index([isDeleted])
 }
+
+model Secret {
+  id             String   @id @default(uuid())
+  tenantId       String
+  keyName        String
+  encryptedValue String
+  iv             String
+  authTag        String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  Tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, keyName])
+  @@index([tenantId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    Int
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Escalation {
+  id          String   @id @default(uuid())
+  tenantId    String
+  sessionId   String
+  visitorId   String?
+  reason      String   // e.g., 'complaint', 'human_request'
+  status      String   @default("pending") // 'pending', 'in_progress', 'resolved'
+  notes       String?  @db.Text // Admin notes
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([sessionId])
+}
+
+model KnowledgeBase {
+  id          String     @id @default(uuid())
+  name        String
+  description String?    @db.Text
+  tenantId    String
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  
+  tenant      Tenant           @relation(fields: [tenantId], references: [id])
+  documents   Document[]
+  agents      Agent[]
+  chunks      KnowledgeChunk[]
+
+  @@index([tenantId])
+}
+
+model Document {
+  id          String           @id @default(uuid())
+  kbId        String
+  type        String           @default("url") // 'url', 'text', 'pdf'
+  source      String           @db.Text // The URL or content
+  status      String           @default("pending") // 'pending', 'processing', 'ready', 'failed'
+  createdAt   DateTime         @default(now())
+  
+  kb          KnowledgeBase    @relation(fields: [kbId], references: [id], onDelete: Cascade)
+  chunks      KnowledgeChunk[]
+
+  @@index([kbId])
+  @@index([status])
+}
+
+model KnowledgeChunk {
+  id          String        @id @default(uuid())
+  kbId        String
+  documentId  String
+  content     String        @db.Text
+  embedding   Float[]
+  createdAt   DateTime      @default(now())
+  
+  kb          KnowledgeBase @relation(fields: [kbId], references: [id], onDelete: Cascade)
+  document    Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([kbId])
+  @@index([documentId])
+}
+
+model Usage {
+  id               String   @id @default(uuid())
+  tenantId         String
+  agentId          String?  // Null if usage is from a global/legacy flow
+  model            String   // e.g., 'gpt-4o-mini', 'jev-latest'
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([createdAt])
+}
+
+
+

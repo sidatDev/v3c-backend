@@ -67,7 +67,8 @@ export class RetrievalService {
     query: string,
     topK: number = 5,
     minSimilarity: number = 0.3,
-    maxContextTokens: number = 1000
+    maxContextTokens: number = 1000,
+    kbId?: string | null
   ): Promise<RetrievalResult> {
     const t0 = Date.now();
     const chunks: RetrievedChunk[] = [];
@@ -84,16 +85,49 @@ export class RetrievalService {
 
       if (queryEmbedding && queryEmbedding.length > 0) {
         const embeddingSql = `[${queryEmbedding.join(',')}]`;
+        const isKbScoped = Boolean(kbId);
+
+        if (isKbScoped) {
+          console.log(`[RetrievalService] Scoping vector search to kbId=${kbId} for tenant=${tenantId}`);
+        } else {
+          console.log(`[RetrievalService] Global vector search for tenant=${tenantId}`);
+        }
 
         // ── Phase 2: pgvector cosine search ──────────────────────────────────
         const tVec0 = Date.now();
-        const rawQuery = `
-          SELECT id, content, metadata, 1 - (embedding::vector <=> $1::vector) as similarity
-          FROM "DocumentChunk"
-          WHERE "tenantId" = $2 AND embedding IS NOT NULL
-          ORDER BY embedding::vector <=> $1::vector ASC
-          LIMIT $3;
-        `;
+        const rawQuery = isKbScoped
+          ? `
+            SELECT 
+              kc.id, 
+              kc.content, 
+              1 - (kc.embedding::vector <=> $1::vector) as similarity,
+              d.source as "sourceUrl",
+              kb.name as "sourceTitle"
+            FROM "KnowledgeChunk" kc
+            JOIN "KnowledgeBase" kb ON kc."kbId" = kb.id
+            LEFT JOIN "Document" d ON kc."documentId" = d.id
+            WHERE kb."tenantId" = $2 AND kc."kbId" = $3 AND kc.embedding IS NOT NULL
+            ORDER BY kc.embedding::vector <=> $1::vector ASC
+            LIMIT $4;
+          `
+          : `
+            SELECT 
+              kc.id, 
+              kc.content, 
+              1 - (kc.embedding::vector <=> $1::vector) as similarity,
+              d.source as "sourceUrl",
+              kb.name as "sourceTitle"
+            FROM "KnowledgeChunk" kc
+            JOIN "KnowledgeBase" kb ON kc."kbId" = kb.id
+            LEFT JOIN "Document" d ON kc."documentId" = d.id
+            WHERE kb."tenantId" = $2 AND kc.embedding IS NOT NULL
+            ORDER BY kc.embedding::vector <=> $1::vector ASC
+            LIMIT $3;
+          `;
+
+        const queryParams = isKbScoped
+          ? [embeddingSql, tenantId, kbId, topK]
+          : [embeddingSql, tenantId, topK];
 
         console.log('[RetrievalService] Embedding param preview:', embeddingSql.substring(0, 80));
 
@@ -122,39 +156,57 @@ export class RetrievalService {
             console.log(`[RetrievalService] HNSW tuning applied: iterative_scan=${iterativeScanApplied ? 'strict_order' : 'skipped'}, ef_search=200`);
 
             try {
-              const countStats: any[] = await tx.$queryRawUnsafe(`
-                SELECT 
-                  (SELECT count(*)::int FROM "DocumentChunk" WHERE embedding IS NOT NULL) as global_count,
-                  (SELECT count(*)::int FROM "DocumentChunk" WHERE "tenantId" = $1 AND embedding IS NOT NULL) as tenant_count;
-              `, tenantId);
-              if (countStats && countStats.length > 0) {
-                console.log(`[RetrievalService] Row count before tenant filter: ${countStats[0].global_count} | After tenant filter: ${countStats[0].tenant_count}`);
+              if (isKbScoped) {
+                const countStats: any[] = await tx.$queryRawUnsafe(`
+                  SELECT 
+                    (SELECT count(*)::int FROM "KnowledgeChunk" WHERE embedding IS NOT NULL) as global_count,
+                    (SELECT count(*)::int FROM "KnowledgeChunk" kc JOIN "KnowledgeBase" kb ON kc."kbId" = kb.id WHERE kb."tenantId" = $1 AND kc."kbId" = $2 AND kc.embedding IS NOT NULL) as tenant_count;
+                `, tenantId, kbId);
+                if (countStats && countStats.length > 0) {
+                  console.log(`[RetrievalService] KB Chunk counts: global=${countStats[0].global_count} | kb_count=${countStats[0].tenant_count}`);
+                }
+              } else {
+                const countStats: any[] = await tx.$queryRawUnsafe(`
+                  SELECT 
+                    (SELECT count(*)::int FROM "KnowledgeChunk" WHERE embedding IS NOT NULL) as global_count,
+                    (SELECT count(*)::int FROM "KnowledgeChunk" kc JOIN "KnowledgeBase" kb ON kc."kbId" = kb.id WHERE kb."tenantId" = $1 AND kc.embedding IS NOT NULL) as tenant_count;
+                `, tenantId);
+                if (countStats && countStats.length > 0) {
+                  console.log(`[RetrievalService] Chunk counts: global=${countStats[0].global_count} | tenant=${countStats[0].tenant_count}`);
+                }
               }
             } catch (countErr: any) {
               console.warn('[RetrievalService] Could not log chunk counts:', countErr?.message || countErr);
             }
 
-            let results: any[] = await tx.$queryRawUnsafe(
-              rawQuery,
-              embeddingSql,
-              tenantId,
-              topK
-            );
+            let results: any[] = await tx.$queryRawUnsafe(rawQuery, ...queryParams);
 
             // If vectorResults.length < topK, retry with exact sequential scan
             if (results.length < topK) {
               console.log(`[RetrievalService] Vector results (${results.length}) < topK (${topK}). Retrying with enable_indexscan = off...`);
               try {
                 await tx.$executeRawUnsafe(`SET LOCAL enable_indexscan = off;`);
-                results = await tx.$queryRawUnsafe(
-                  rawQuery,
-                  embeddingSql,
-                  tenantId,
-                  topK
-                );
+                results = await tx.$queryRawUnsafe(rawQuery, ...queryParams);
                 console.log(`[RetrievalService] Sequential scan fallback returned: ${results.length} rows`);
               } catch (retryErr: any) {
                 console.warn('[RetrievalService] Exact scan retry failed, keeping initial results:', retryErr?.message || retryErr);
+              }
+            }
+
+            // Fallback for non-scoped legacy searches: if 0 results in KnowledgeChunk, check legacy DocumentChunk
+            if (!isKbScoped && results.length === 0) {
+              try {
+                const legacyQuery = `
+                  SELECT id, content, metadata, 1 - (embedding::vector <=> $1::vector) as similarity
+                  FROM "DocumentChunk"
+                  WHERE "tenantId" = $2 AND embedding IS NOT NULL
+                  ORDER BY embedding::vector <=> $1::vector ASC
+                  LIMIT $3;
+                `;
+                results = await tx.$queryRawUnsafe(legacyQuery, embeddingSql, tenantId, topK);
+                console.log(`[RetrievalService] Fallback to legacy DocumentChunk returned: ${results.length} rows`);
+              } catch (legacyErr: any) {
+                console.warn('[RetrievalService] Legacy DocumentChunk query error:', legacyErr?.message || legacyErr);
               }
             }
 
@@ -163,7 +215,7 @@ export class RetrievalService {
         } catch (rawErr: any) {
           console.error('[RetrievalService] Raw pgvector query threw an error:', {
             query: rawQuery,
-            params: [embeddingSql.substring(0, 80), tenantId, topK],
+            params: queryParams,
             error: rawErr?.message || rawErr
           });
           throw rawErr;
@@ -172,9 +224,10 @@ export class RetrievalService {
 
         console.log('[RetrievalService] Raw rows returned:', vectorResults.length);
         if (vectorResults.length === 0) {
-          console.error('[RetrievalService] Vector query returned 0 rows:', {
-            query: rawQuery,
-            params: [embeddingSql.substring(0, 80), tenantId, topK]
+          console.warn('[RetrievalService] Vector query returned 0 rows for query:', {
+            query,
+            kbId: kbId || null,
+            tenantId
           });
         }
 
@@ -182,19 +235,19 @@ export class RetrievalService {
           topSimilarity = parseFloat(vectorResults[0].similarity) || 0;
           for (const res of vectorResults) {
             const sim = parseFloat(res.similarity) || 0;
-            // Content length filter: skip noise chunks with < 100 characters
-            if (!res.content || res.content.trim().length < 100) {
-              console.log(`[RetrievalService] Skipped noise chunk (content length < 100): ${res.content?.trim().length || 0} chars`);
+            // Content length filter: skip noise chunks with < 20 characters
+            if (!res.content || res.content.trim().length < 20) {
+              console.log(`[RetrievalService] Skipped noise chunk (content length < 20): ${res.content?.trim().length || 0} chars`);
               continue;
             }
             if (sim >= minSimilarity) {
-              let title = 'Knowledge Base Chunk';
-              let url: string | undefined = undefined;
+              let title = res.sourceTitle || 'Knowledge Base Chunk';
+              let url: string | undefined = res.sourceUrl;
 
               if (res.metadata) {
                 const meta = res.metadata as any;
                 title = meta.filename || meta.title || title;
-                url = meta.url;
+                url = meta.url || url;
               }
 
               chunks.push({
@@ -213,6 +266,7 @@ export class RetrievalService {
     } catch (err: any) {
       StructuredLogger.warn('[RetrievalService] Vector search failed', {
         tenantId,
+        kbId: kbId || null,
         error: err?.message || err
       });
     }
@@ -232,6 +286,7 @@ export class RetrievalService {
 
     StructuredLogger.info('[RetrievalService] Search completed', {
       tenantId,
+      kbId: kbId || null,
       retrievedChunks: chunks.length,
       topSimilarity,
       avgSimilarity,

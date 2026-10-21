@@ -122,3 +122,26 @@ export const protect = async (request: FastifyRequest, reply: FastifyReply) => {
   // 7. Grant access to protected route and attach user context
   request.user = decoded;
 };
+
+/**
+ * Strict authentication middleware for highly sensitive operations (e.g. Secrets, BYOK, Credentials).
+ * Additionally verifies active refresh token validity in the database.
+ */
+export const protectStrict = async (request: FastifyRequest, reply: FastifyReply) => {
+  await protect(request, reply);
+
+  if (request.user && request.user.userId) {
+    const activeTokensCount = await prisma.refreshToken.count({
+      where: {
+        userId: request.user.userId,
+        revoked: false,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (activeTokensCount === 0) {
+      throw new AppError('Session expired or revoked. Please log in again.', 401);
+    }
+  }
+};
+

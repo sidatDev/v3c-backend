@@ -8,6 +8,9 @@ import { ChatService } from '../services/ai/ChatService';
 import { VoiceService } from '../services/ai/VoiceService';
 import { SecurityShieldService } from '../services/security/SecurityShieldService';
 import { LeadQualificationService } from '../services/ai/LeadQualificationService';
+import { ChannelGateway, V3CMessage } from '../services/gateway/ChannelGateway';
+import { OrchestratorService } from '../services/orchestrator/OrchestratorService';
+import { ScopeGuard } from '../services/orchestrator/ScopeGuard';
 
 export default async function publicRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -397,9 +400,82 @@ ${snippets}`;
       throw new AppError('Message content cannot be empty', 400);
     }
 
+    // Channel Gateway observation point (web channel)
+    let v3cMessage: V3CMessage | null = null;
+    let resolvedTenantId = '';
+    let resolvedSessionId = sessionId ? String(sessionId) : '';
+
+    try {
+      if (sessionId) {
+        const sessionRecord = await prisma.visitorSession.findUnique({
+          where: { id: Number(sessionId) },
+          select: { id: true, tenantId: true }
+        });
+        if (sessionRecord) {
+          resolvedTenantId = sessionRecord.tenantId || '';
+          resolvedSessionId = String(sessionRecord.id);
+        }
+      }
+
+      if (!resolvedTenantId && slug) {
+        const tenant = await prisma.tenant.findFirst({
+          where: { slug },
+          select: { id: true }
+        });
+        if (tenant) resolvedTenantId = tenant.id;
+      }
+
+      v3cMessage = ChannelGateway.ingest({
+        channel: 'web',
+        tenantId: resolvedTenantId,
+        sessionId: resolvedSessionId,
+        content: message,
+        language: language === 'en' || language === 'ur' ? language : 'unknown',
+        metadata: { agentId, slug, interestedClientId }
+      });
+    } catch {
+      // Swallowed: route can never fail because of gateway logging
+    }
+
+    const msgToDecide: V3CMessage = v3cMessage || {
+      messageId: randomUUID(),
+      channel: 'web',
+      tenantId: resolvedTenantId,
+      sessionId: resolvedSessionId,
+      language: language === 'en' || language === 'ur' ? language : 'unknown',
+      content: message,
+      metadata: { agentId, slug, interestedClientId },
+      receivedAt: new Date().toISOString()
+    };
+
+    // Orchestrator Scope Gate
+    const decision = await OrchestratorService.decide(msgToDecide);
+    if (!decision.approved) {
+      return {
+        status: 'success',
+        data: {
+          reply: ScopeGuard.REFUSAL_TEXT,
+          sources: [],
+          fallbackTriggered: true,
+          topicLinks: []
+        }
+      };
+    }
+
+    // Orchestrator Dynamic Agent Routing
+    let routedAgentId = agentId;
+    try {
+      const routing = await OrchestratorService.routeMessage(resolvedTenantId, msgToDecide.content, resolvedSessionId);
+      if (routing?.agentId) {
+        routedAgentId = routing.agentId;
+      }
+    } catch (routeErr: any) {
+      console.warn('[ROUTING_FALLBACK] Orchestrator routeMessage failed, falling back to default agent:', routeErr?.message || routeErr);
+    }
+
     const result = await ChatService.processMessage({
       sessionId: sessionId ? Number(sessionId) : undefined,
-      agentId,
+      agentId: routedAgentId,
       publicKey,
       slug,
       message,

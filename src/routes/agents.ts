@@ -5,6 +5,7 @@ import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { TenantConfigCache } from '../services/cache/TenantConfigCache';
 import { applyTenantScope, effectiveTenantId } from '../utils/tenantScope';
+import { VoicePersonaLibraryService } from '../services/voice/VoicePersonaLibraryService';
 
 export default async function agentsRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -23,6 +24,9 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         },
         Domain: {
           select: { id: true, domain: true, publicKey: true }
+        },
+        KnowledgeBase: {
+          select: { id: true, name: true }
         }
       },
       orderBy: { createdAt: 'desc' }
@@ -49,7 +53,10 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
         AgentTopicLink: {
           orderBy: { displayOrder: 'asc' }
         },
-        Domain: true
+        Domain: true,
+        KnowledgeBase: {
+          select: { id: true, name: true }
+        }
       }
     });
 
@@ -74,12 +81,22 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
     const body = request.body as any;
     const agentId = randomUUID();
 
+    if (body.isDefault) {
+      await prisma.agent.updateMany({
+        where: { tenantId },
+        data: { isDefault: false }
+      });
+    }
+
     const agent = await prisma.agent.create({
       data: {
         id: agentId,
         tenantId,
         name: body.name || 'New AI Agent',
         description: body.description || null,
+        type: body.type || 'general',
+        isDefault: Boolean(body.isDefault),
+        knowledgeBaseId: body.knowledgeBaseId || null,
         voice: body.voice || 'alloy',
         language: body.language || 'English',
         systemPrompt: body.systemPrompt || 'You are an AI Virtual Customer Assistant.',
@@ -143,11 +160,28 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
           ? { ...((existing.voiceSettings as object) || {}), gender: body.gender } 
           : existing.voiceSettings);
 
+    if (body.isDefault === true && existing.tenantId) {
+      await prisma.agent.updateMany({
+        where: { tenantId: existing.tenantId },
+        data: { isDefault: false }
+      });
+    }
+
+    const nextKbId =
+      body.knowledgeBaseId !== undefined
+        ? body.knowledgeBaseId === '' || body.knowledgeBaseId === null
+          ? null
+          : body.knowledgeBaseId
+        : existing.knowledgeBaseId;
+
     const updated = await prisma.agent.update({
       where: { id },
       data: {
         name: body.name !== undefined ? body.name : existing.name,
         description: body.description !== undefined ? body.description : existing.description,
+        type: body.type !== undefined ? body.type : existing.type,
+        isDefault: body.isDefault !== undefined ? Boolean(body.isDefault) : existing.isDefault,
+        knowledgeBaseId: nextKbId,
         voice: body.voice !== undefined ? body.voice : existing.voice,
         language: body.language !== undefined ? body.language : existing.language,
         systemPrompt: body.systemPrompt !== undefined ? body.systemPrompt : existing.systemPrompt,
@@ -416,6 +450,81 @@ export default async function agentsRoutes(fastify: FastifyInstance, options: Fa
     return {
       status: 'success',
       message: 'Topic link removed'
+    };
+  });
+
+  // @route   GET /api/agents/:id/voice-library
+  // @desc    Get V3C Voice Library catalog & agent's multi-voice rotation/assignment config (Blueprint Sec 7.2)
+  fastify.get('/:id/voice-library', { preHandler: protect }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant required', 400);
+    const { id: agentId } = request.params as { id: string };
+
+    const state = await VoicePersonaLibraryService.getAgentVoiceLibraryState(tenantId, agentId);
+    return {
+      status: 'success',
+      data: state
+    };
+  });
+
+  // @route   PUT /api/agents/:id/voice-library
+  // @desc    Save agent's Voice Assignment Mode, Rotation Pool, Channel/Time/Segment maps & Shortlist
+  fastify.put('/:id/voice-library', { preHandler: protect }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant required', 400);
+    const { id: agentId } = request.params as { id: string };
+    const body = request.body as any;
+
+    const updated = await VoicePersonaLibraryService.saveAgentVoiceAssignment(tenantId, agentId, body);
+    return {
+      status: 'success',
+      message: 'Voice persona assignment and rotation pool updated',
+      data: updated
+    };
+  });
+
+  // @route   POST /api/agents/:id/voice-library/preview
+  // @desc    Generate 15-second standardized sample preview with custom brand name injection & pace control
+  fastify.post('/:id/voice-library/preview', { preHandler: protect }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant required', 400);
+    const body = request.body as {
+      voiceId: string;
+      language?: string;
+      pace?: 'slow' | 'normal' | 'fast';
+      brandName?: string;
+    };
+
+    const preview = VoicePersonaLibraryService.generateSamplePreview({
+      voiceId: body.voiceId || 'shimmer',
+      language: body.language || 'English',
+      pace: body.pace || 'normal',
+      brandName: body.brandName || 'IGI Insurance'
+    });
+
+    return {
+      status: 'success',
+      data: preview
+    };
+  });
+
+  // @route   POST /api/agents/:id/voice-library/resolve-session
+  // @desc    Resolve session voice persona (rotates through pool or applies channel/time/segment rules)
+  fastify.post('/:id/voice-library/resolve-session', { preHandler: protect }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant required', 400);
+    const { id: agentId } = request.params as { id: string };
+    const body = (request.body as any) || {};
+
+    const resolved = await VoicePersonaLibraryService.resolveSessionVoicePersona(tenantId, agentId, {
+      channel: body.channel,
+      hourOfDay: body.hourOfDay !== undefined ? Number(body.hourOfDay) : undefined,
+      customerSegment: body.customerSegment
+    });
+
+    return {
+      status: 'success',
+      data: resolved
     };
   });
 }

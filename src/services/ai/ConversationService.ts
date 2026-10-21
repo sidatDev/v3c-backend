@@ -1,9 +1,10 @@
 import prisma from '../../lib/prisma';
 import { openai } from '../../utils/openai';
 import { StructuredLogger } from '../logger/StructuredLogger';
+import { RealtimeHub } from '../realtime/RealtimeHub';
 
 export interface MessageRecord {
-  sender: 'visitor' | 'ai' | 'user' | 'assistant';
+  sender: 'visitor' | 'ai' | 'user' | 'assistant' | 'human_agent';
   message: string;
   createdAt?: Date;
 }
@@ -108,7 +109,7 @@ export class ConversationService {
   }
 
   /**
-   * Save a message (visitor or AI) to DB
+   * Save a message (visitor, AI, or human_agent) to DB
    */
   static async saveMessage(params: {
     tenantId: string;
@@ -117,7 +118,7 @@ export class ConversationService {
     visitorId?: number | null;
     leadId?: number | null;
     interestedClientId?: number | null;
-    sender: 'visitor' | 'ai';
+    sender: 'visitor' | 'ai' | 'human_agent';
     message: string;
   }): Promise<void> {
     const { tenantId, agentId, sessionId, visitorId, sender, message } = params;
@@ -165,7 +166,7 @@ export class ConversationService {
     }
 
     try {
-      await prisma.conversation.create({
+      const savedMsg = await prisma.conversation.create({
         data: {
           tenantId,
           aiAgentId: agentId,
@@ -176,6 +177,13 @@ export class ConversationService {
           leadId: activeLeadId,
           interestedClientId: targetClientId
         }
+      });
+      RealtimeHub.broadcast(tenantId, 'new_message', {
+        id: savedMsg.id,
+        sessionId,
+        sender,
+        message: savedMsg.message,
+        createdAt: savedMsg.createdAt
       });
       console.log(`[ConversationService] Saved ${sender} message for session #${sessionId}, interestedClientId: ${targetClientId || 'none'}`);
     } catch (err: any) {

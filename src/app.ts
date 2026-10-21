@@ -26,6 +26,7 @@ import aiLogsRoutes from './routes/ai-logs';
 import analyticsRoutes from './routes/analytics';
 import superAdminRoutes from './routes/super-admin';
 import publicRoutes from './routes/public';
+import whatsappRoutes from './routes/whatsapp';
 import { errorHandler } from './middleware/error';
 import { auditLoggerHook } from './middleware/audit';
 
@@ -79,11 +80,29 @@ app.register(cookie);
 app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 app.register(websocket);
 
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body: string, done) => {
+  if (!body || body.trim() === '') {
+    return done(null, {});
+  }
+  try {
+    return done(null, JSON.parse(body));
+  } catch (err: any) {
+    return done(err, undefined);
+  }
+});
+
+app.addHook('onRequest', async (req) => {
+  if (req.url.includes('whatsapp')) {
+    console.log('[DEBUG] WhatsApp route hit:', req.method, req.url);
+  }
+});
+
 // 3. Register Global Audit Logger Hook
 app.addHook('onResponse', auditLoggerHook);
 
 import billingRoutes from './routes/billing';
 import departmentsRoutes from './routes/departments';
+import secretsRoutes from './routes/secrets';
 
 import leadsRoutes from './routes/leads';
 
@@ -91,7 +110,9 @@ import leadsRoutes from './routes/leads';
 app.register(authRoutes, { prefix: '/api/auth' });
 app.register(rolesRoutes, { prefix: '/api/roles' });
 app.register(departmentsRoutes, { prefix: '/api/departments' });
+app.register(secretsRoutes, { prefix: '/api/secrets' });
 app.register(dashboardRoutes, { prefix: '/api/dashboard' });
+
 app.register(conversationsRoutes, { prefix: '/api/conversations' });
 app.register(leadsRoutes, { prefix: '/api/leads' });
 app.register(widgetRoutes, { prefix: '/api/widget' });
@@ -109,6 +130,7 @@ app.register(analyticsRoutes, { prefix: '/api/analytics' });
 app.register(billingRoutes, { prefix: '/api/billing' });
 app.register(superAdminRoutes, { prefix: '/api/super-admin' });
 app.register(publicRoutes, { prefix: '/api/public' });
+app.register(whatsappRoutes, { prefix: '/api/whatsapp' });
 
 // Health Check
 app.get('/health', async (request, reply) => {

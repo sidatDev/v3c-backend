@@ -1,8 +1,31 @@
-import { FastifyInstance, FastifyPluginOptions } from 'fastify';
+import { FastifyInstance, FastifyPluginOptions, FastifyRequest } from 'fastify';
 import prisma from '../lib/prisma';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { applyTenantScope } from '../utils/tenantScope';
+import { XPayService, XPayPaymentMethod } from '../services/billing/XPayService';
+import { DiscountAndInvoiceService } from '../services/billing/DiscountAndInvoiceService';
+
+async function resolveBillingTenantId(request: FastifyRequest): Promise<string> {
+  const headerTenant = request.headers['x-tenant-id'];
+  const explicitTenantId = Array.isArray(headerTenant) ? headerTenant[0] : headerTenant;
+
+  if (!request.user && (request.headers.authorization || request.cookies?.token)) {
+    try {
+      await protect(request, {} as any);
+    } catch (_) {
+      // Allow fallback to x-tenant-id if provided
+    }
+  }
+
+  const tenantId =
+    explicitTenantId?.trim() ||
+    request.user?.activeTenantId ||
+    request.user?.tenantId ||
+    '8a123d29-99da-4db4-9141-8f6bb9b7233a';
+
+  return tenantId;
+}
 
 export default async function billingRoutes(fastify: FastifyInstance, options: FastifyPluginOptions) {
 
@@ -131,5 +154,182 @@ export default async function billingRoutes(fastify: FastifyInstance, options: F
         }
       }
     };
+  });
+
+  // @route   GET /api/billing/quota
+  // @desc    Get Phase 5 token quota status, 80%/95%/100% alert state, bundles & XPay transactions
+  fastify.get('/quota', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const data = await XPayService.getQuotaStatus(tenantId);
+    return {
+      status: 'success',
+      data
+    };
+  });
+
+  // @route   PUT /api/billing/quota
+  // @desc    Update tenant monthly token limit and hard-stop enforcement setting
+  fastify.put('/quota', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const body = (request.body || {}) as {
+      baseTokenLimit?: number;
+      hardStopEnabled?: boolean;
+    };
+
+    const data = await XPayService.updateQuotaSettings(tenantId, body);
+    return {
+      status: 'success',
+      data
+    };
+  });
+
+  // @route   POST /api/billing/xpay/create-intent
+  // @desc    Create an XPay Sandbox Payment Intent (Card, JazzCash, EasyPaisa) with HMAC-SHA256 signature
+  fastify.post('/xpay/create-intent', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const body = (request.body || {}) as {
+      bundleId?: string;
+      paymentMethod?: XPayPaymentMethod;
+      customer?: { name?: string; email?: string; phone?: string };
+    };
+
+    if (!body.bundleId) {
+      throw new AppError('bundleId is required', 400);
+    }
+
+    const intent = await XPayService.createPaymentIntent({
+      tenantId,
+      bundleId: body.bundleId,
+      paymentMethod: body.paymentMethod || 'card',
+      customer: body.customer
+    });
+
+    return {
+      status: 'success',
+      data: intent
+    };
+  });
+
+  // @route   POST /api/billing/xpay/confirm-sandbox
+  // @desc    Confirm an XPay Sandbox payment (Card / JazzCash / EasyPaisa) and credit bundle tokens
+  fastify.post('/xpay/confirm-sandbox', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const body = (request.body || {}) as {
+      paymentIntentId?: string;
+      maskedAccount?: string;
+    };
+
+    if (!body.paymentIntentId) {
+      throw new AppError('paymentIntentId is required', 400);
+    }
+
+    const result = await XPayService.confirmSandboxPayment({
+      tenantId,
+      paymentIntentId: body.paymentIntentId,
+      maskedAccount: body.maskedAccount
+    });
+
+    return {
+      status: 'success',
+      data: result
+    };
+  });
+
+  // @route   POST /api/billing/xpay/webhook
+  // @desc    Verify XPay HMAC-SHA256 webhook signature and credit token bundle
+  fastify.post('/xpay/webhook', async (request, reply) => {
+    const signatureHeader =
+      (request.headers['x-signature'] as string) ||
+      (request.headers['x-xpay-signature'] as string) ||
+      '';
+    const payload = (request.body || {}) as Record<string, any>;
+    const rawBody = JSON.stringify(payload);
+
+    if (!XPayService.verifyWebhookSignature(rawBody, signatureHeader)) {
+      throw new AppError('Invalid XPay webhook HMAC-SHA256 signature', 401);
+    }
+
+    const tenantId = payload.metadata?.tenantId || (await resolveBillingTenantId(request));
+    const paymentIntentId = payload.paymentIntentId || payload.id;
+
+    if (paymentIntentId && payload.status === 'succeeded') {
+      const result = await XPayService.confirmSandboxPayment({
+        tenantId,
+        paymentIntentId,
+        maskedAccount: payload.maskedAccount || 'XPay Webhook'
+      });
+      return {
+        status: 'success',
+        received: true,
+        data: result
+      };
+    }
+
+    return {
+      status: 'success',
+      received: true
+    };
+  });
+
+  // @route   GET /api/billing/discounts-and-invoices
+  // @desc    Blueprint Sec 6.3 & 6.5: Get active discounts, self-serve threshold & enterprise invoices
+  fastify.get('/discounts-and-invoices', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const data = await DiscountAndInvoiceService.getOverview(tenantId);
+    return { status: 'success', data };
+  });
+
+  // @route   POST /api/billing/discounts
+  // @desc    Blueprint Sec 6.5: Create a discount rule (percentage, volume, loyalty, group_code, trial_credit)
+  fastify.post('/discounts', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const body = (request.body || {}) as any;
+
+    if (!body.code || !body.type) {
+      throw new AppError('Discount code and type are required', 400);
+    }
+
+    const rule = await DiscountAndInvoiceService.createDiscountRule(tenantId, body);
+    return { status: 'success', data: rule };
+  });
+
+  // @route   POST /api/billing/invoices/request
+  // @desc    Blueprint Sec 6.3: Submit a formal Enterprise Invoice Request (> PKR 100,000 threshold)
+  fastify.post('/invoices/request', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const body = (request.body || {}) as {
+      requestedTokens?: number;
+      grossAmountPkr?: number;
+      discountCode?: string;
+      notes?: string;
+    };
+
+    if (!body.requestedTokens || !body.grossAmountPkr) {
+      throw new AppError('requestedTokens and grossAmountPkr are required', 400);
+    }
+
+    const invoice = await DiscountAndInvoiceService.submitEnterpriseInvoiceRequest(tenantId, {
+      requestedTokens: Number(body.requestedTokens),
+      grossAmountPkr: Number(body.grossAmountPkr),
+      discountCode: body.discountCode,
+      notes: body.notes,
+    });
+
+    return { status: 'success', data: invoice };
+  });
+
+  // @route   POST /api/billing/invoices/:invoiceId/approve-credit
+  // @desc    Blueprint Sec 6.3: Sidat Super User manual token credit upon invoice payment confirmation
+  fastify.post('/invoices/:invoiceId/approve-credit', async (request, reply) => {
+    const tenantId = await resolveBillingTenantId(request);
+    const { invoiceId } = request.params as { invoiceId: string };
+    const body = (request.body || {}) as { approvedBy?: string; reason?: string };
+
+    const result = await DiscountAndInvoiceService.approveAndCreditInvoice(
+      tenantId,
+      invoiceId,
+      body
+    );
+    return { status: 'success', data: result };
   });
 }

@@ -2,9 +2,13 @@ import { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import bcrypt from 'bcrypt';
 import { randomUUID, randomBytes } from 'crypto';
 import prisma from '../lib/prisma';
-import { signToken, getCookieOptions } from '../utils/jwt';
+import { signToken, getCookieOptions, signTempMfaToken, verifyTempMfaToken } from '../utils/jwt';
 import { protect } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import { generateMfaSetup, verifyMfaCode } from '../services/mfaService';
+import { issueAuthTokens, rotateRefreshToken, revokeRefreshToken } from '../services/tokenService';
+import { logAudit } from '../lib/audit';
+
 
 // Helper to generate a slug from tenant name
 const slugify = (text: string) => {
@@ -184,7 +188,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
   });
 
   // @route   POST /api/auth/login
-  // @desc    Log in user and establish active session
+  // @desc    Log in user and establish active session (or request MFA code)
   fastify.post('/login', async (request, reply) => {
     const { email, password, rememberMe } = request.body as any;
 
@@ -197,126 +201,132 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
       where: { email },
       include: {
         Tenant: true,
-        department: true
-      }
+        department: true,
+      },
     });
 
     if (!user || user.status !== 'active' || !(await bcrypt.compare(password, user.password))) {
       throw new AppError('Incorrect email or password.', 401);
     }
 
-    // Get User Roles and Permissions
-    const userRoles = await prisma.userRole.findMany({
-      where: { userId: user.id },
-      include: { Role: true }
-    });
-
-    if (userRoles.length === 0) {
-      throw new AppError('No roles assigned to this user.', 403);
+    // If MFA is enabled on user account, return short-lived tempToken and challenge
+    if (user.mfaEnabled) {
+      const tempToken = signTempMfaToken(user.id, user.email);
+      return {
+        status: 'success',
+        requiresMfa: true,
+        tempToken,
+      };
     }
 
-    // Get primary role and level (L0_PLATFORM > L1_GROUP > L2_COMPANY > L3_DEPARTMENT > L4_AGENT)
-    let primaryRole = 'member';
-    let primaryRoleLevel: string = 'L4_AGENT';
-
-    if (userRoles.some(ur => ur.Role.name === 'super_admin' || ur.Role.level === 'L0_PLATFORM')) {
-      primaryRole = 'super_admin';
-      primaryRoleLevel = 'L0_PLATFORM';
-    } else if (userRoles.some(ur => ur.Role.level === 'L1_GROUP')) {
-      const groupRole = userRoles.find(ur => ur.Role.level === 'L1_GROUP')!;
-      primaryRole = groupRole.Role.name;
-      primaryRoleLevel = 'L1_GROUP';
-    } else if (userRoles.some(ur => ur.Role.name === 'manager' || ur.Role.level === 'L2_COMPANY')) {
-      primaryRole = 'manager';
-      primaryRoleLevel = 'L2_COMPANY';
-    } else if (userRoles.some(ur => ur.Role.level === 'L3_DEPARTMENT')) {
-      const deptRole = userRoles.find(ur => ur.Role.level === 'L3_DEPARTMENT')!;
-      primaryRole = deptRole.Role.name;
-      primaryRoleLevel = 'L3_DEPARTMENT';
-    } else if (userRoles.length > 0) {
-      primaryRole = userRoles[0].Role.name;
-      primaryRoleLevel = userRoles[0].Role.level || 'L4_AGENT';
-    }
-
-    // Get role IDs
-    const roleIds = userRoles.map(ur => ur.roleId);
-
-    // Get all permissions for roles
-    const rolePermissions = await prisma.rolePermission.findMany({
-      where: { roleId: { in: roleIds } },
-      include: { Permission: true }
-    });
-    const permissions = rolePermissions.map(rp => `${rp.Permission.resource}:${rp.Permission.action}`);
-
-    // Create session token with hierarchy payload
-    const tokenPayload = {
-      userId: user.id,
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      tenantId: user.tenantId,
-      groupId: user.Tenant?.groupId || null,
-      departmentId: user.departmentId || null,
-      role: primaryRole,
-      roleLevel: primaryRoleLevel,
-      permissions
-    };
-    const token = signToken(tokenPayload, rememberMe);
-
-    // Set session expiry
-    const duration = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    const expiresAt = new Date(Date.now() + duration);
-
-    // Save session in database
-    await prisma.userSession.create({
-      data: {
-        id: randomUUID(),
-        userId: user.id,
-        tenantId: user.tenantId,
-        token,
-        ipAddress: request.ip || null,
-        userAgent: request.headers['user-agent'] || null,
-        expiresAt
-      }
-    });
+    // Issue short-lived JWT (1h) and long-lived refresh token (7d)
+    const authResult = await issueAuthTokens(
+      user,
+      request.ip || null,
+      request.headers['user-agent'] || null
+    );
 
     // Update user lastLogin
     await prisma.user.update({
       where: { id: user.id },
-      data: { lastLogin: new Date() }
+      data: { lastLogin: new Date() },
     });
 
-    // Log login audit
-    request.auditLog = {
-      action: 'LOGIN',
-      resourceType: 'User',
-      resourceId: user.id.toString()
-    };
+    // Append-only audit log
+    await logAudit(
+      prisma,
+      user.id,
+      'USER_LOGIN',
+      'User',
+      String(user.id),
+      null,
+      request.ip || null
+    );
 
     // Set cookie and respond
-    reply.setCookie('token', token, getCookieOptions(rememberMe));
-    
+    reply.setCookie('token', authResult.token, getCookieOptions(rememberMe));
+
     return {
       status: 'success',
       data: {
-        token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: primaryRole,
-          roleLevel: primaryRoleLevel,
-          tenantId: user.tenantId,
-          groupId: user.Tenant?.groupId || null,
-          departmentId: user.departmentId || null,
-          tenantSlug: user.Tenant?.slug || 'v3c-system-tenant',
-          domainId: user.domainId,
-          companyName: user.Tenant?.name || null
-        },
-        permissions
-      }
+        token: authResult.token,
+        refreshToken: authResult.refreshToken,
+        expiresIn: authResult.expiresIn,
+        user: authResult.user,
+        permissions: authResult.permissions,
+      },
     };
   });
+
+  // @route   POST /api/auth/login/mfa-verify
+  // @desc    Complete login with 6-digit TOTP verification
+  fastify.post('/login/mfa-verify', async (request, reply) => {
+    const { tempToken, code, rememberMe } = request.body as any;
+
+    if (!tempToken || !code) {
+      throw new AppError('Please provide both tempToken and 6-digit MFA code.', 400);
+    }
+
+    let payload: any;
+    try {
+      payload = verifyTempMfaToken(tempToken);
+    } catch {
+      throw new AppError('Invalid or expired MFA session. Please log in again.', 401);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      include: {
+        Tenant: true,
+        department: true,
+      },
+    });
+
+    if (!user || user.status !== 'active' || !user.mfaEnabled || !user.mfaSecret) {
+      throw new AppError('MFA verification is not active for this account.', 401);
+    }
+
+    const isValid = verifyMfaCode(user.mfaSecret, String(code));
+    if (!isValid) {
+      throw new AppError('Invalid MFA verification code.', 401);
+    }
+
+    // Issue short-lived JWT (1h) and long-lived refresh token (7d)
+    const authResult = await issueAuthTokens(
+      user,
+      request.ip || null,
+      request.headers['user-agent'] || null
+    );
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLogin: new Date() },
+    });
+
+    await logAudit(
+      prisma,
+      user.id,
+      'USER_LOGIN_MFA',
+      'User',
+      String(user.id),
+      null,
+      request.ip || null
+    );
+
+    reply.setCookie('token', authResult.token, getCookieOptions(rememberMe));
+
+    return {
+      status: 'success',
+      data: {
+        token: authResult.token,
+        refreshToken: authResult.refreshToken,
+        expiresIn: authResult.expiresIn,
+        user: authResult.user,
+        permissions: authResult.permissions,
+      },
+    };
+  });
+
 
   // @route   GET /api/auth/me
   // @desc    Get current user profile and permissions from session
@@ -378,8 +388,14 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
   });
 
   // @route   POST /api/auth/logout
-  // @desc    Invalidate current session and clear authentication cookie
+  // @desc    Invalidate current session, revoke refresh token, and clear authentication cookie
   fastify.post('/logout', async (request, reply) => {
+    const { refreshToken } = (request.body as any) || {};
+
+    if (refreshToken) {
+      await revokeRefreshToken(refreshToken);
+    }
+
     let token: string | undefined;
 
     if (request.cookies && request.cookies.token) {
@@ -392,7 +408,7 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
       // Invalidate session in DB
       await prisma.userSession.updateMany({
         where: { token, isActive: true },
-        data: { isActive: false }
+        data: { isActive: false },
       });
     }
 
@@ -400,11 +416,140 @@ export default async function authRoutes(fastify: FastifyInstance, options: Fast
       path: '/',
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax'
+      sameSite: 'lax',
     });
-    
+
     return { status: 'success', message: 'Logged out successfully.' };
   });
+
+  // @route   POST /api/auth/refresh
+  // @desc    Rotate refresh token and issue a new short-lived JWT
+  fastify.post('/refresh', async (request, reply) => {
+    const { refreshToken } = (request.body as any) || {};
+
+    if (!refreshToken) {
+      throw new AppError('Refresh token is required.', 400);
+    }
+
+    const rotated = await rotateRefreshToken(
+      refreshToken,
+      request.ip || null,
+      request.headers['user-agent'] || null
+    );
+
+    reply.setCookie('token', rotated.token, getCookieOptions(false));
+
+    return {
+      status: 'success',
+      data: rotated,
+    };
+  });
+
+  // @route   POST /api/auth/mfa/setup
+  // @desc    Generate TOTP secret and QR code for scanning
+  fastify.post('/mfa/setup', { preHandler: protect }, async (request, reply) => {
+    const user = await prisma.user.findUnique({
+      where: { id: request.user!.userId },
+      select: { email: true, mfaEnabled: true },
+    });
+
+    if (!user) {
+      throw new AppError('User not found.', 404);
+    }
+
+    const setupResult = await generateMfaSetup(user.email);
+
+    return {
+      status: 'success',
+      data: setupResult,
+    };
+  });
+
+  // @route   POST /api/auth/mfa/enable
+  // @desc    Verify TOTP code and enable MFA on account
+  fastify.post('/mfa/enable', { preHandler: protect }, async (request, reply) => {
+    const { token, secret } = request.body as any;
+
+    if (!token || !secret) {
+      throw new AppError('Please provide both the 6-digit verification code and setup secret.', 400);
+    }
+
+    const isValid = verifyMfaCode(secret, String(token));
+    if (!isValid) {
+      throw new AppError('Invalid MFA verification code.', 400);
+    }
+
+    await prisma.user.update({
+      where: { id: request.user!.userId },
+      data: {
+        mfaEnabled: true,
+        mfaSecret: secret,
+      },
+    });
+
+    await logAudit(
+      prisma,
+      request.user!.userId,
+      'MFA_ENABLED',
+      'User',
+      String(request.user!.userId),
+      null,
+      request.ip || null
+    );
+
+    return {
+      status: 'success',
+      message: 'Multi-Factor Authentication has been successfully enabled.',
+    };
+  });
+
+  // @route   POST /api/auth/mfa/disable
+  // @desc    Disable MFA on account with code verification
+  fastify.post('/mfa/disable', { preHandler: protect }, async (request, reply) => {
+    const { token } = request.body as any;
+
+    if (!token) {
+      throw new AppError('Please provide your 6-digit MFA verification code.', 400);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: request.user!.userId },
+      select: { mfaEnabled: true, mfaSecret: true },
+    });
+
+    if (!user || !user.mfaEnabled || !user.mfaSecret) {
+      throw new AppError('MFA is not enabled on this account.', 400);
+    }
+
+    const isValid = verifyMfaCode(user.mfaSecret, String(token));
+    if (!isValid) {
+      throw new AppError('Invalid MFA verification code.', 400);
+    }
+
+    await prisma.user.update({
+      where: { id: request.user!.userId },
+      data: {
+        mfaEnabled: false,
+        mfaSecret: null,
+      },
+    });
+
+    await logAudit(
+      prisma,
+      request.user!.userId,
+      'MFA_DISABLED',
+      'User',
+      String(request.user!.userId),
+      null,
+      request.ip || null
+    );
+
+    return {
+      status: 'success',
+      message: 'Multi-Factor Authentication has been successfully disabled.',
+    };
+  });
+
 
   // @route   POST /api/auth/forgot-password
   // @desc    Generate password reset token and return connection info

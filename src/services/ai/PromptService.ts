@@ -4,7 +4,7 @@ export interface PromptBuildParams {
   tenantConfig: TenantConfig;
   retrievedContext?: string;
   summary?: string;
-  recentMessages?: { sender: 'visitor' | 'ai' | 'user' | 'assistant'; message: string }[];
+  recentMessages?: { sender: 'visitor' | 'ai' | 'user' | 'assistant' | 'human_agent'; message: string }[];
   currentMessage?: string;
   language?: string;
   isVoice?: boolean;

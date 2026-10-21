@@ -8,7 +8,8 @@ import { generateEmbedding, chunkText } from '../utils/openai';
 import { randomUUID } from 'crypto';
 import { TenantConfigCache } from '../services/cache/TenantConfigCache';
 import { FirecrawlService } from '../services/ai/FirecrawlService';
-import { applyTenantScope } from '../utils/tenantScope';
+import { applyTenantScope, effectiveTenantId } from '../utils/tenantScope';
+import { KbGovernanceService } from '../services/kb/KbGovernanceService';
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (!a || !b || a.length !== b.length || a.length === 0) return 0;
@@ -657,5 +658,105 @@ export default async function knowledgeBaseRoutes(fastify: FastifyInstance, opti
     results.sort((a, b) => b.score - a.score);
 
     return { status: 'success', data: results.slice(0, 10) };
+  });
+
+  // ==========================================
+  // 7. KB GOVERNANCE: APPROVAL WORKFLOW, EXPIRY TAGGING & 1-CLICK VERSION ROLLBACK (Blueprint Sec 5.3 & 5.4)
+  // ==========================================
+
+  // @route   GET /api/kb/governance
+  fastify.get('/governance', { preHandler: [protect] }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const overview = await KbGovernanceService.getGovernanceOverview(tenantId);
+    return { status: 'success', data: overview };
+  });
+
+  // @route   POST /api/kb/governance/submit
+  fastify.post('/governance/submit', { preHandler: [protect] }, async (request, reply) => {
+    const user = request.user!;
+    const tenantId = effectiveTenantId(user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const body = request.body as any;
+    const record = await KbGovernanceService.submitEntryChange(
+      tenantId,
+      { id: String(user.id || 'admin'), name: user.name },
+      body
+    );
+
+    return { status: 'success', message: 'KB entry submitted into governance workflow', data: record };
+  });
+
+  // @route   POST /api/kb/governance/:entryId/decision
+  fastify.post('/governance/:entryId/decision', { preHandler: [protect] }, async (request, reply) => {
+    const user = request.user!;
+    const tenantId = effectiveTenantId(user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const entryId = parseInt((request.params as any).entryId, 10);
+    if (isNaN(entryId)) throw new AppError('Invalid entryId', 400);
+
+    const body = request.body as { decision: 'APPROVE' | 'REJECT'; reviewNotes?: string };
+    const record = await KbGovernanceService.approveOrRejectEntry(
+      tenantId,
+      { id: String(user.id || 'admin'), name: user.name },
+      entryId,
+      body.decision || 'APPROVE',
+      body.reviewNotes
+    );
+
+    return {
+      status: 'success',
+      message: `KB entry #${entryId} ${body.decision === 'REJECT' ? 'rejected' : 'approved and activated'}`,
+      data: record
+    };
+  });
+
+  // @route   POST /api/kb/governance/:entryId/rollback
+  fastify.post('/governance/:entryId/rollback', { preHandler: [protect] }, async (request, reply) => {
+    const user = request.user!;
+    const tenantId = effectiveTenantId(user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const entryId = parseInt((request.params as any).entryId, 10);
+    if (isNaN(entryId)) throw new AppError('Invalid entryId', 400);
+
+    const body = request.body as { targetVersionNumber: number };
+    const result = await KbGovernanceService.rollbackEntryVersion(
+      tenantId,
+      { id: String(user.id || 'admin'), name: user.name },
+      entryId,
+      Number(body.targetVersionNumber || 1)
+    );
+
+    return {
+      status: 'success',
+      message: `Rolled back KB entry #${entryId} to v${result.rolledBackToVersion}`,
+      data: result
+    };
+  });
+
+  // @route   POST /api/kb/governance/expiry-sweep
+  fastify.post('/governance/expiry-sweep', { preHandler: [protect] }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const sweepResult = await KbGovernanceService.runExpirySweep(tenantId);
+    return {
+      status: 'success',
+      message: 'KB content expiry sweep completed',
+      data: sweepResult
+    };
+  });
+
+  // @route   GET /api/kb/governance/export
+  fastify.get('/governance/export', { preHandler: [protect] }, async (request, reply) => {
+    const tenantId = effectiveTenantId(request.user);
+    if (!tenantId) throw new AppError('Tenant context required', 400);
+
+    const exportPayload = await KbGovernanceService.exportStructuredKbJson(tenantId);
+    return { status: 'success', data: exportPayload };
   });
 }

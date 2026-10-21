@@ -17,13 +17,28 @@ export interface TokenPayload {
 }
 
 export const signToken = (payload: TokenPayload, rememberMe: boolean = false): string => {
-  const expiresIn = rememberMe ? '30d' : '24h';
+  const expiresIn = rememberMe ? '24h' : '1h'; // Short-lived access token
   return jwt.sign(payload, JWT_SECRET, { expiresIn });
 };
 
 export const verifyToken = (token: string): TokenPayload => {
   return jwt.verify(token, JWT_SECRET) as TokenPayload;
 };
+
+export interface TempMfaTokenPayload {
+  userId: number;
+  email: string;
+  isMfaPending: true;
+}
+
+export const signTempMfaToken = (userId: number, email: string): string => {
+  return jwt.sign({ userId, email, isMfaPending: true }, JWT_SECRET, { expiresIn: '5m' });
+};
+
+export const verifyTempMfaToken = (token: string): TempMfaTokenPayload => {
+  return jwt.verify(token, JWT_SECRET) as TempMfaTokenPayload;
+};
+
 
 export interface CookieOptions {
   httpOnly: boolean;

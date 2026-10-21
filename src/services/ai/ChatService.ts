@@ -3,8 +3,11 @@ import { PromptService } from './PromptService';
 import { RetrievalService } from './RetrievalService';
 import { ConversationService } from './ConversationService';
 import { SecurityShieldService } from '../security/SecurityShieldService';
+import { OtpVerificationService } from '../security/OtpVerificationService';
 import { AiGateway } from './AiGateway';
 import prisma from '../../lib/prisma';
+import { OrchestratorService } from '../orchestrator/OrchestratorService';
+import { ScopeGuard } from '../orchestrator/ScopeGuard';
 
 export interface ChatMessageParams {
   sessionId?: number;
@@ -25,12 +28,29 @@ export class ChatService {
     sources: any[];
     fallbackTriggered: boolean;
     topicLinks?: any[];
+    humanTakeoverActive?: boolean;
   }> {
     const { sessionId, agentId, publicKey, slug, message, language = 'en' } = params;
 
     // 1. Resolve Tenant Configuration from Cache
     const tenantConfig = await TenantConfigCache.getTenantConfig(publicKey, agentId, slug);
-    const { tenantId, agent } = tenantConfig;
+    let { tenantId, agent } = tenantConfig;
+
+    // If agentId is provided, fetch that specific Agent record from the database
+    if (agentId) {
+      const specificAgent = await prisma.agent.findUnique({
+        where: { id: agentId },
+        include: { RetrievalConfig: true }
+      });
+      if (specificAgent) {
+        agent = specificAgent;
+        tenantConfig.agent = specificAgent;
+        if (!tenantId && specificAgent.tenantId) {
+          tenantId = specificAgent.tenantId;
+          tenantConfig.tenantId = specificAgent.tenantId;
+        }
+      }
+    }
 
     // 2. Security Shield: Prompt Injection Detector
     const injectionMatch = SecurityShieldService.detectPromptInjection(message);
@@ -92,12 +112,138 @@ export class ChatService {
           sender: 'visitor',
           message
         });
+
+        // Silent-Listener Mode: When a human agent has taken over (status === 'HUMAN'),
+        // record the visitor message & broadcast via RealtimeHub, but do NOT auto-reply as AI.
+        if (dbSession.status === 'HUMAN') {
+          console.log(`[ChatService] Session #${dbSession.id} is in HUMAN takeover mode (silent listener). Skipping auto AI reply.`);
+          return {
+            reply: '',
+            sources: [],
+            fallbackTriggered: false,
+            topicLinks: [],
+            humanTakeoverActive: true
+          };
+        }
+      }
+    }
+
+    // 3.5 Orchestrator OTP Verification Gate (Blueprint Sec 4.2 & 4.6: Account Modification Restriction)
+    const otpSubjectId = String(sessionId || params.interestedClientId || 'anon_session');
+    const isDigitCode = /^\d{4,6}$/.test(message.trim());
+
+    if (
+      isDigitCode &&
+      OtpVerificationService.hasPendingChallenge(
+        tenantId,
+        otpSubjectId,
+        'conversation_account_action'
+      )
+    ) {
+      const verifyRes = await OtpVerificationService.verifyOtp({
+        tenantId,
+        subjectId: otpSubjectId,
+        purpose: 'conversation_account_action',
+        code: message.trim(),
+      });
+      const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
+      const otpReply = verifyRes.verified
+        ? isUrdu
+          ? 'آپ کا او ٹی پی (OTP) کامیابی سے تصدیق ہو گیا ہے۔ اب آپ اپنے اکاؤنٹ یا پالیسی میں تبدیلی کی تفصیلات بتا سکتے ہیں۔'
+          : 'Your OTP has been verified successfully! You are now authorized to proceed with your account or policy modification request.'
+        : verifyRes.reason;
+
+      if (dbSession) {
+        await ConversationService.saveMessage({
+          tenantId,
+          agentId: agent.id,
+          sessionId: dbSession.id,
+          visitorId: dbSession.visitorId,
+          leadId,
+          interestedClientId,
+          sender: 'ai',
+          message: otpReply,
+        });
+      }
+      return {
+        reply: otpReply,
+        sources: [],
+        fallbackTriggered: false,
+      };
+    }
+
+    if (
+      OtpVerificationService.detectSensitiveAccountAction(message) &&
+      !OtpVerificationService.isVerified(tenantId, otpSubjectId, 'conversation_account_action')
+    ) {
+      const otpPolicy = await OtpVerificationService.getPolicy(tenantId);
+      if (otpPolicy.enforceOnConversationAccountModify) {
+        const challenge = await OtpVerificationService.issueOtp({
+          tenantId,
+          subjectId: otpSubjectId,
+          purpose: 'conversation_account_action',
+          targetContact: `Session-${otpSubjectId}`,
+        });
+        const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
+        const challengeMsg = isUrdu
+          ? `حفاظتی اصولوں کے تحت اکاؤنٹ یا پالیسی میں تبدیلی سے پہلے تصدیق ضروری ہے۔ ہم نے آپ کو ${challenge.otpLength} ہندسوں کا OTP بھیج دیا ہے (ٹیسٹ کوڈ: ${challenge.sandboxOtpPreview})۔ براہ کرم آگے بڑھنے کے لیے OTP درج کریں۔`
+          : `For your security, sensitive account or policy modifications require OTP verification. We have sent a ${challenge.otpLength}-digit OTP to your registered contact (Sandbox Code: ${challenge.sandboxOtpPreview}). Please reply with the code to proceed.`;
+
+        if (dbSession) {
+          await ConversationService.saveMessage({
+            tenantId,
+            agentId: agent.id,
+            sessionId: dbSession.id,
+            visitorId: dbSession.visitorId,
+            leadId,
+            interestedClientId,
+            sender: 'ai',
+            message: challengeMsg,
+          });
+        }
+        return {
+          reply: challengeMsg,
+          sources: [],
+          fallbackTriggered: false,
+        };
       }
     }
 
     // 4. Perform Retrieval-Augmented Generation (RAG)
     const threshold = agent.RetrievalConfig?.similarityThreshold ?? 0.3;
-    const retrievalResult = await RetrievalService.search(tenantId, message, 5, threshold);
+    const kbId = agentId ? (agent?.knowledgeBaseId || null) : null;
+    const retrievalResult = await RetrievalService.search(tenantId, message, 5, threshold, 1000, kbId);
+
+    // Post-Retrieval Confidence Gate: Validate top chunk directly answers the query
+    if (retrievalResult.chunks && retrievalResult.chunks.length > 0 && !retrievalResult.fallbackTriggered) {
+      const topChunkText = retrievalResult.chunks[0].content;
+      const isConfident = await OrchestratorService.validateRagConfidence(message, topChunkText, tenantId, agent?.id || null);
+      if (!isConfident) {
+        console.log(`[ChatService] RAG confidence check rejected top chunk for query: "${message}"`);
+        const isUrdu = language === 'ur' || /[\u0600-\u06FF]/.test(message);
+        const refusal = isUrdu ? ScopeGuard.REFUSAL_TEXT : ScopeGuard.REFUSAL_TEXT_EN;
+
+        if (dbSession) {
+          await ConversationService.saveMessage({
+            tenantId,
+            agentId: agent.id,
+            sessionId: dbSession.id,
+            visitorId: dbSession.visitorId,
+            leadId,
+            interestedClientId,
+            sender: 'ai',
+            message: refusal
+          });
+        }
+
+        return {
+          reply: refusal,
+          sources: [],
+          fallbackTriggered: true,
+          topicLinks: []
+        };
+      }
+    }
 
     let reply = '';
     let topicLinks: { title: string; url: string }[] = [];
@@ -157,6 +303,7 @@ export class ChatService {
     const completion = await AiGateway.complete({
       messages,
       tenantId,
+      agentId: agent?.id,
       sessionId,
       mode: 'chat'
     });
@@ -210,6 +357,65 @@ export class ChatService {
       sources: retrievalResult.sources,
       fallbackTriggered: retrievalResult.fallbackTriggered,
       topicLinks
+    };
+  }
+
+  /**
+   * Silent-Listener AI Suggestion:
+   * Generates a RAG-assisted reply draft for a human operator without sending it to the visitor.
+   */
+  static async generateSilentSuggestion(
+    sessionId: number,
+    tenantId: string
+  ): Promise<{ suggestion: string; sources: any[] }> {
+    const sessionCtx = await ConversationService.getSessionContext(sessionId, tenantId);
+    const { dbSession, recentMessages, summary } = sessionCtx;
+
+    const lastVisitorMsg =
+      [...recentMessages].reverse().find((m) => m.sender === 'visitor' || m.sender === 'user')?.message ||
+      'Please provide a helpful follow-up response to the customer.';
+
+    const tenantConfig = await TenantConfigCache.getTenantConfig(
+      undefined,
+      dbSession?.aiAgentId || undefined,
+      undefined
+    );
+    const agent = tenantConfig.agent;
+    const kbId = agent?.knowledgeBaseId || null;
+    const threshold = agent?.RetrievalConfig?.similarityThreshold ?? 0.3;
+
+    const retrievalResult = await RetrievalService.search(
+      tenantId,
+      lastVisitorMsg,
+      4,
+      threshold,
+      1000,
+      kbId
+    );
+
+    const messages = PromptService.buildMessages({
+      tenantConfig,
+      retrievedContext:
+        retrievalResult.contextText ||
+        `[SILENT LISTENER SUGGESTION]: Suggest a polite, concise, accurate reply for the human support agent to send to the customer regarding ${agent?.name || 'our services'}.`,
+      summary,
+      recentMessages,
+      currentMessage: lastVisitorMsg,
+      language: 'en',
+      voice: agent?.voice || 'alloy',
+    });
+
+    const completion = await AiGateway.complete({
+      messages,
+      tenantId,
+      agentId: agent?.id,
+      sessionId,
+      mode: 'chat',
+    });
+
+    return {
+      suggestion: completion.reply,
+      sources: retrievalResult.sources || [],
     };
   }
 }
